@@ -1,8 +1,21 @@
 # 小黑盒论坛 - VSCode 插件 🎮
 
+[![GitHub](https://img.shields.io/badge/GitHub-WenfuRainbow/heybox-blue?logo=github)](https://github.com/WenfuRainbow/heybox)
+
 在 VSCode 中浏览小黑盒（xiaoheihe.cn）论坛帖子和评论，支持隐身模式。
 
 ## 功能
+
+### 🔐 登录/退出登录
+侧边栏工具栏提供登录和退出登录按钮：
+- **登录** — 弹出输入框，粘贴从浏览器复制的 Cookie 即可登录
+- **退出登录** — 清除已保存的 Cookie
+
+### 🎨 主题切换
+支持手动切换 Webview 主题：
+- **跟随 VSCode** — 自动匹配当前主题（默认）
+- **暗色主题** — 强制使用暗色
+- **亮色主题** — 强制使用亮色
 
 ### 📌 推荐 & 📁 板块 & ⭐ 收藏（Tab 切换）
 侧边栏顶部有 Tab 切换按钮：
@@ -63,30 +76,30 @@
 ## 首次使用
 
 1. 安装后在侧边栏出现 HeyBox 图标，点击展开侧边栏
-2. **首次使用需要配置 Cookie**
-3. 打开浏览器访问 [xiaoheihe.cn](https://www.xiaoheihe.cn) 并登录
-4. 按 `F12` 打开开发者工具 → Network 标签 → 刷新页面
-5. 任意请求中找到请求头 `Cookie`，复制完整值
-6. 回到 VSCode → 设置 → 搜索 `heybox.cookie` → 粘贴 Cookie
-7. 刷新侧边栏即可使用
+2. 点击侧边栏工具栏的登录按钮，粘贴 Cookie
+3. 或者：打开浏览器访问 [xiaoheihe.cn](https://www.xiaoheihe.cn) 并登录，按 `F12` 打开开发者工具 → Network → 复制 Cookie
 
-> ⚠️ Cookie 会过期，过期后重新复制即可。
+> ⚠️ Cookie 会过期，过期后重新登录即可。
 
 ## 配置项
 
 | 设置项 | 类型 | 默认值 | 说明 |
 |--------|------|--------|------|
-| `heybox.cookie` | string | `""` | 小黑盒网站 Cookie（必需） |
+| `heybox.cookie` | string | `""` | 小黑盒网站 Cookie（通过登录命令设置） |
 | `heybox.heyboxId` | string | `""` | 用户 ID（自动从 Cookie 提取） |
 | `heybox.deviceId` | string | `""` | 设备 ID（自动生成） |
 | `heybox.stealthMode` | boolean | `false` | 隐身模式 |
 | `heybox.minimalMode` | boolean | `false` | 简约模式 |
 | `heybox.postDetailLocation` | enum | `"sidebar"` | 帖子详情显示位置（sidebar/editor/beside） |
+| `heybox.theme` | enum | `"auto"` | Webview 主题（auto/dark/light） |
 
 ## 命令
 
 | 命令 | 说明 |
 |------|------|
+| HeyBox: 登录 | 弹出输入框登录 |
+| HeyBox: 退出登录 | 清除 Cookie |
+| HeyBox: 切换主题 | 切换 Webview 主题 |
 | HeyBox: 打开帖子 | 打开选中的帖子 |
 | HeyBox: 搜索帖子 | 搜索论坛帖子 |
 | HeyBox: 刷新列表 | 刷新话题/搜索结果/推荐 |
@@ -113,7 +126,7 @@ F5               # 启动 Extension Development Host
 ## 隐私说明
 
 - 插件仅通过 API 读取公开论坛数据
-- Cookie 存储在 VSCode 设置中，仅用于 API 认证
+- Cookie 存储在 VSCode SecretStorage 中（加密），不写入明文配置
 - 不会收集任何用户数据
 
 ## 免责声明

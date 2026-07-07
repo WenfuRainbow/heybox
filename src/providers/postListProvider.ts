@@ -5,6 +5,7 @@ import { SearchItemInfo, TopicChild } from "../types";
 type ViewMode = "recommend" | "categories" | "favorites";
 
 const FAV_KEY = "heybox.favorites";
+const MAX_SEARCH_RESULTS = 200; // 搜索结果上限，防止内存无限增长
 
 function getFavs(context?: vscode.ExtensionContext): SearchItemInfo[] {
     if (!context) return [];
@@ -35,6 +36,10 @@ export class PostListProvider
 
     private viewMode: ViewMode = "categories";
 
+    getViewMode(): ViewMode {
+        return this.viewMode;
+    }
+
     private topics: TopicChild[] = [];
     private topicPosts: Map<number, SearchItemInfo[]> = new Map();
     private topicOffsets: Map<number, number> = new Map();
@@ -52,6 +57,10 @@ export class PostListProvider
     private feedLoading: boolean = false;
 
     constructor(private client: HeyBoxClient) {}
+
+    dispose(): void {
+        this._onDidChangeTreeData.dispose();
+    }
 
     refresh(): void {
         this.exitSearch();
@@ -90,12 +99,17 @@ export class PostListProvider
 
     async loadMoreSearchResults(): Promise<void> {
         if (this.searchLoading) return;
+        if (this.searchResults.length >= MAX_SEARCH_RESULTS) return;
         this.searchLoading = true;
         try {
             this.searchPage++;
             const result = await this.client.searchPosts(this.searchQuery, this.searchPage, 20);
             const newPosts = (result.items || []).map((item) => item.info).filter((info) => info && info.linkid);
             this.searchResults = this.searchResults.concat(newPosts);
+            // 截断到上限
+            if (this.searchResults.length > MAX_SEARCH_RESULTS) {
+                this.searchResults = this.searchResults.slice(0, MAX_SEARCH_RESULTS);
+            }
         } catch (e) {
             vscode.window.showErrorMessage(`搜索失败: ${(e as Error).message}`);
         } finally { this.searchLoading = false; }
@@ -116,7 +130,7 @@ export class PostListProvider
                 tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None)));
                 tabs.push(new LoadMoreFeedItem());
             } else if (this.viewMode === "favorites") {
-                const favs = getFavs(this.client["context"]);
+                const favs = getFavs(this.client.getContext());
                 if (favs.length === 0) {
                     tabs.push(new TabEmptyItem("暂无收藏，右键帖子可以收藏"));
                 } else {

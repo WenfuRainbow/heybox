@@ -6,12 +6,13 @@ import { SearchItemInfo, PostTreeResult } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
+let postListProvider: PostListProvider | undefined;
 let currentPanel: vscode.WebviewPanel | undefined;
 const MAX_HISTORY = 50;
 
 export function activate(context: vscode.ExtensionContext): void {
     const client = new HeyBoxClient(context);
-    const postListProvider = new PostListProvider(client);
+    postListProvider = new PostListProvider(client);
 
     const treeView = vscode.window.createTreeView("heybox.postList", {
         treeDataProvider: postListProvider, showCollapseAll: true,
@@ -26,18 +27,18 @@ export function activate(context: vscode.ExtensionContext): void {
     });
     applyStealthMode();
 
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", () => { client.loadConfig(); postListProvider.refresh(); }));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", () => { client.loadConfig(); postListProvider!.refresh(); }));
     context.subscriptions.push(vscode.commands.registerCommand("heybox.searchPost", async () => {
         const q = await vscode.window.showInputBox({ prompt: "搜索帖子", placeHolder: "输入关键词", ignoreFocusOut: true });
-        if (q?.trim()) await postListProvider.performSearch(q.trim());
+        if (q?.trim()) await postListProvider!.performSearch(q.trim());
     }));
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.exitSearch", () => { postListProvider.exitSearch(); postListProvider.refresh(); }));
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToRecommend", () => postListProvider.switchTo("recommend")));
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToCategories", () => postListProvider.switchTo("categories")));
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToFavorites", () => postListProvider.switchTo("favorites")));
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreSearch", async () => postListProvider.loadMoreSearch()));
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMore", async (t: number) => postListProvider.loadMorePosts(t)));
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFeed", async () => postListProvider.loadMoreFeed()));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.exitSearch", () => { postListProvider!.exitSearch(); postListProvider!.refresh(); }));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToRecommend", () => postListProvider!.switchTo("recommend")));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToCategories", () => postListProvider!.switchTo("categories")));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToFavorites", () => postListProvider!.switchTo("favorites")));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreSearch", async () => postListProvider!.loadMoreSearch()));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMore", async (t: number) => postListProvider!.loadMorePosts(t)));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFeed", async () => postListProvider!.loadMoreFeed()));
 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.openPost", async (post: SearchItemInfo) => {
         if (!post?.linkid) return;
@@ -72,11 +73,53 @@ export function activate(context: vscode.ExtensionContext): void {
             toggleFav(context, post); // 回滚
             vscode.window.showErrorMessage("收藏失败，请检查网络后重试");
         }
-        postListProvider.switchTo(postListProvider["viewMode"] as any);
+        postListProvider!.switchTo(postListProvider!.getViewMode());
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.toggleSidebar", async () => {
         await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.login", async () => {
+        const cookie = await vscode.window.showInputBox({
+            prompt: "请输入小黑盒 Cookie",
+            placeHolder: "从浏览器开发者工具复制的 Cookie",
+            password: true,
+            ignoreFocusOut: true
+        });
+        if (!cookie) return;
+        if (client.validateCookie(cookie)) {
+            await client.setCookie(cookie);
+            vscode.window.showInformationMessage("登录成功！");
+            postListProvider!.refresh();
+        } else {
+            vscode.window.showErrorMessage("Cookie 格式无效，需要包含 heybox_id 或 x_xhh_tokenid");
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.logout", async () => {
+        const confirmed = await vscode.window.showWarningMessage(
+            "确定要退出登录？",
+            "确定", "取消"
+        );
+        if (confirmed === "确定") {
+            await client.clearCookie();
+            vscode.window.showInformationMessage("已退出登录");
+            postListProvider!.refresh();
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchTheme", async () => {
+        const current = vscode.workspace.getConfiguration("heybox").get<string>("theme", "auto");
+        const picked = await vscode.window.showQuickPick([
+            { label: "跟随 VSCode", value: "auto", description: current === "auto" ? "当前" : "" },
+            { label: "暗色主题", value: "dark", description: current === "dark" ? "当前" : "" },
+            { label: "亮色主题", value: "light", description: current === "light" ? "当前" : "" }
+        ], { placeHolder: "选择 Webview 主题" });
+        if (picked) {
+            await vscode.workspace.getConfiguration("heybox").update("theme", picked.value, vscode.ConfigurationTarget.Global);
+            vscode.window.showInformationMessage(`主题已切换为: ${picked.label}`);
+        }
     }));
 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.openClipboardUrl", async () => {
@@ -87,7 +130,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }));
 
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("heybox")) { client.loadConfig(); applyStealthMode(); postListProvider.refresh(); }
+        if (e.affectsConfiguration("heybox")) { client.loadConfig(); applyStealthMode(); postListProvider!.refresh(); }
     }));
 }
 
@@ -98,8 +141,9 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             if (!tree || !tree.link) { vscode.window.showWarningMessage("未获取到帖子内容"); return; }
 
             const history = context.globalState.get<string[]>("history", []);
-            const entry = `${tree.link.title || "无标题"}||${linkId}`;
-            const deduped = history.filter(h => !h.endsWith(`||${linkId}`));
+            const SEP = "\x00"; // 使用 null 字符作为分隔符，避免与标题内容冲突
+            const entry = `${tree.link.title || "无标题"}${SEP}${linkId}`;
+            const deduped = history.filter(h => !h.endsWith(`${SEP}${linkId}`));
             deduped.unshift(entry);
             context.globalState.update("history", deduped.slice(0, MAX_HISTORY));
 
@@ -126,10 +170,16 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
 
             // 如果仍有不足，加载额外页面
             const commentLimit = 30;
+            const pageSize = 10; // API 每页返回的评论数
             if (totalCommentNum > allCommentGroups.length && allCommentGroups.length < commentLimit) {
                 const tasks: Promise<void>[] = [];
-                const offsets = [11];
-                if (commentLimit > 20) offsets.push(21);
+                // 根据已加载数量和总数量动态计算需要加载的偏移量
+                const offsets: number[] = [];
+                let nextOffset = allCommentGroups.length;
+                while (nextOffset < Math.min(totalCommentNum, commentLimit)) {
+                    offsets.push(nextOffset);
+                    nextOffset += pageSize;
+                }
                 for (const o of offsets) {
                     tasks.push(client.getPostTree(linkId, o, 10).then(r => {
                         if (r?.comments) {
@@ -154,7 +204,7 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
 
             if (location === "sidebar" && postDetailProvider) {
                 postDetailProvider.showPost(fullTree, commentNote, foldedTips);
-                if (!(postDetailProvider as any)._view) {
+                if (!postDetailProvider.isViewVisible()) {
                     vscode.window.showInformationMessage("帖子已加载，请在侧边栏点击「帖子详情」查看");
                 }
             } else {
@@ -174,9 +224,7 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
 }
 
 function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxClient): void {
-    const config = vscode.workspace.getConfiguration("heybox");
-    let cookie = config.get<string>("cookie", "");
-    if (!cookie) cookie = client["cookie"];
+    let cookie = client.getCookie();
 
     if (!cookie) {
         vscode.window.showWarningMessage(
@@ -192,10 +240,8 @@ function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxCl
 
 async function importCookieFromClipboard(context: vscode.ExtensionContext, client: HeyBoxClient): Promise<void> {
     const clip = await vscode.env.clipboard.readText();
-    if (clip.includes("heybox_id") || clip.includes("x_xhh_tokenid") || clip.includes("user_pkey")) {
-        const configTarget = vscode.ConfigurationTarget.Global;
-        await vscode.workspace.getConfiguration("heybox").update("cookie", clip, configTarget);
-        client.loadConfig();
+    if (client.validateCookie(clip)) {
+        await client.setCookie(clip);
         vscode.window.showInformationMessage("Cookie 已导入！请刷新侧边栏。");
     } else {
         vscode.window.showWarningMessage("剪贴板内容不是有效的 Cookie，请重新复制（需要包含 heybox_id 字段）");
@@ -210,4 +256,6 @@ function applyStealthMode(): void {
     vscode.commands.executeCommand("setContext", "heybox.stealth", isStealthMode());
 }
 
-export function deactivate(): void {}
+export function deactivate(): void {
+    postListProvider?.dispose();
+}

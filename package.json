@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "kyo",
   "engines": {
     "vscode": "^1.85.0"
@@ -47,6 +47,21 @@
         {
           "command": "heybox.refreshList",
           "when": "view == heybox.postList || view == heybox.postDetail",
+          "group": "navigation"
+        },
+        {
+          "command": "heybox.login",
+          "when": "view == heybox.postList",
+          "group": "navigation"
+        },
+        {
+          "command": "heybox.logout",
+          "when": "view == heybox.postList",
+          "group": "navigation"
+        },
+        {
+          "command": "heybox.switchTheme",
+          "when": "view == heybox.postList",
           "group": "navigation"
         }
       ],
@@ -139,6 +154,24 @@
       {
         "command": "heybox.openClipboardUrl",
         "title": "从剪贴板URL打开帖子",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.login",
+        "title": "登录",
+        "icon": "$(sign-in)",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.logout",
+        "title": "退出登录",
+        "icon": "$(sign-out)",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.switchTheme",
+        "title": "切换主题",
+        "icon": "$(symbol-color)",
         "category": "HeyBox"
       }
     ],
@@ -245,6 +278,21 @@
             "在编辑区侧边显示"
           ],
           "description": "帖子详情显示位置"
+        },
+        "heybox.theme": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "dark",
+            "light"
+          ],
+          "enumDescriptions": [
+            "跟随 VSCode 主题",
+            "强制暗色主题",
+            "强制亮色主题"
+          ],
+          "description": "Webview 主题模式"
         }
       }
     }
@@ -260,7 +308,6 @@
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/vscode": "^1.85.0",
-    "better-sqlite3": "^12.11.1",
     "typescript": "^5.3.0"
   }
 }

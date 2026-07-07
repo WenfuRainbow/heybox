@@ -34,7 +34,7 @@ export interface PostImage {
 }
 
 export interface PostLink {
-    linkid: number | string;
+    linkid: number;
     title: string;
     description: string;
     text: string;
@@ -55,13 +55,7 @@ export interface PostLink {
     has_video?: number;
 }
 
-export interface CommentUser {
-    userid: number;
-    username: string;
-    avatar: string;
-    level_info: LevelInfo;
-    medals: Medal[];
-}
+export type CommentUser = User;
 
 export interface CommentImage {
     url: string;
@@ -90,9 +84,7 @@ export interface CommentGroup {
 export interface PostTreeResult {
     link: PostLink;
     comments: CommentGroup[];
-    total_page: number;
     has_more_floors: number;
-    total_floor_num: number;
 }
 
 export interface ApiResponse<T> {

@@ -1,4 +1,15 @@
+import * as vscode from "vscode";
 import { PostTreeResult, Comment } from "../types";
+
+function getThemeOverrides(): string {
+    const theme = vscode.workspace.getConfiguration("heybox").get<string>("theme", "auto");
+    if (theme === "dark") {
+        return `--bg:#1e1e1e;--fg:#d4d4d4;--dim:#9d9d9d;--border:#333;--badge-bg:#4d4d4d;--badge-fg:#fff;--input-bg:#3c3c3c`;
+    } else if (theme === "light") {
+        return `--bg:#ffffff;--fg:#1e1e1e;--dim:#616161;--border:#e0e0e0;--badge-bg:#e0e0e0;--badge-fg:#333;--input-bg:#f3f3f3`;
+    }
+    return "";
+}
 
 export function formatTs(ts: number): string {
     if (!ts) return "";
@@ -6,9 +17,18 @@ export function formatTs(ts: number): string {
     if (diff < 60) return "刚刚";
     if (diff < 3600) return `${Math.floor(diff / 60)}分钟前`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
-    if (diff < 2592000) return `${Math.floor(diff / 86400)}天前`;
-    const d = new Date(ts * 1000);
-    return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+
+    const now = new Date();
+    const date = new Date(ts * 1000);
+    const dayDiff = Math.floor(diff / 86400);
+
+    if (dayDiff < 7) return `${dayDiff}天前`;
+    if (dayDiff < 30) return `${Math.floor(dayDiff / 7)}周前`;
+
+    const monthDiff = (now.getFullYear() - date.getFullYear()) * 12 + (now.getMonth() - date.getMonth());
+    if (monthDiff < 12) return `${monthDiff}个月前`;
+
+    return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
 export function escHtml(s: string): string {
@@ -22,7 +42,7 @@ export function renderContent(text: string): string {
         const blocks = JSON.parse(text);
         if (Array.isArray(blocks)) {
             return blocks.map((b: { type: string; url?: string; text?: string }) => {
-                if (b.type === "img" && b.url) return `<img src="${escHtml(b.url)}" />`;
+                if (b.type === "img" && b.url) return `<img src="${escHtml(b.url)}" alt="帖子图片" loading="lazy" />`;
                 if (b.type === "text" && b.text) return `<p>${escHtml(b.text)}</p>`;
                 return "";
             }).join("");
@@ -34,26 +54,9 @@ export function renderContent(text: string): string {
 export function renderCommentHtml(c: Comment, sub: boolean, stealth: boolean): string {
     const level = c.user.level_info?.status === 1 ? `Lv.${c.user.level_info.level}` : "";
     const replyto = c.replyuser ? `<span class="rpl">${escHtml(c.replyuser.username)}</span>` : "";
-    const imgs = (c.imgs || []).map((i) => `<img class="cimg" src="${escHtml(i.url)}" />`).join("");
-    const avatar = (!c.user.avatar || stealth) ? "" : `<img class="cava" src="${escHtml(c.user.avatar)}" onerror="this.style.display='none'" />`;
-    return `<div class="cm${sub ? " sub" : ""}">${avatar}<div class="cbd"><div class="chd">${escHtml(c.user.username)} ${level ? `<span class="clv">${level}</span>` : ""} <span class="flr">#${c.floor_num}</span> ${replyto}</div><div class="cmeta">${formatTs(c.create_at)}${c.ip_location ? ` · ${escHtml(c.ip_location)}` : ""}${!stealth ? ` · 👍${c.up}` : ""}</div><div class="ct">${escHtml(c.text || "")}</div>${imgs}</div></div>`;
-}
-
-export function gatherComments(
-    postTree: PostTreeResult,
-    allComments: Comment[][],
-    seenIds: Set<string>
-): Comment[] {
-    const result: Comment[] = [];
-    for (const group of allComments) {
-        for (const c of group) {
-            if (!seenIds.has(c.commentid)) {
-                seenIds.add(c.commentid);
-                result.push(c);
-            }
-        }
-    }
-    return result;
+    const imgs = (c.imgs || []).map((i) => `<img class="cimg" src="${escHtml(i.url)}" alt="评论图片" loading="lazy" />`).join("");
+    const avatar = (!c.user.avatar || stealth) ? "" : `<img class="cava" src="${escHtml(c.user.avatar)}" alt="${escHtml(c.user.username)} 的头像" onerror="this.style.display='none'" />`;
+    return `<article class="cm${sub ? " sub" : ""}" aria-label="${escHtml(c.user.username)} 的评论">${avatar}<div class="cbd"><div class="chd">${escHtml(c.user.username)} ${level ? `<span class="clv">${level}</span>` : ""} <span class="flr">#${c.floor_num}</span> ${replyto}</div><div class="cmeta">${formatTs(c.create_at)}${c.ip_location ? ` · ${escHtml(c.ip_location)}` : ""}${!stealth ? ` · 👍${c.up}` : ""}</div><div class="ct">${escHtml(c.text || "")}</div>${imgs}</div></article>`;
 }
 
 export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote?: string, foldedTips?: string): string {
@@ -69,19 +72,24 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
         if (!g.comment || g.comment.length === 0) return "";
         const main = renderCommentHtml(g.comment[0], false, stealth);
         const subs = g.comment.slice(1).map((c) => renderCommentHtml(c, true, stealth)).join("");
-        return `<div class="cg">${main}${subs}</div>`;
+        return `<section class="cg" aria-label="评论组">${main}${subs}</section>`;
     }).join("");
 
+    const themeOverrides = getThemeOverrides();
+    const rootStyle = themeOverrides ? ` style="${themeOverrides}"` : "";
+
     return `<!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN"${rootStyle}>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 <style>
     :root{--bg:var(--vscode-editor-background,#1e1e1e);--fg:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#9d9d9d);--border:var(--vscode-panel-border,#333);--badge-bg:var(--vscode-badge-background,#4d4d4d);--badge-fg:var(--vscode-badge-foreground,#fff);--input-bg:var(--vscode-input-background,#3c3c3c);--font:var(--vscode-font-family);--fs:var(--vscode-font-size,13px);--scale:1}
     *{margin:0;padding:0;box-sizing:border-box}
     body{font-family:var(--font);font-size:var(--fs);background:var(--bg);color:var(--fg);padding:16px 24px;line-height:1.6}
     .ctrl{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim);padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:16px}
-    .ctrl input{flex:1;max-width:160px;accent-color:var(--link);cursor:pointer}
-    .title{font-size:22px;font-weight:700;margin-bottom:10px}
+    .ctrl label{white-space:nowrap}
+    .ctrl input{flex:1;max-width:160px;accent-color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer}
+    h1{font-size:22px;font-weight:700;margin-bottom:10px}
     .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
     .tags{font-size:12px;color:var(--dim);margin-bottom:8px}
     .body{font-size:14px;margin-bottom:20px}
@@ -104,14 +112,20 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .img-preview img{width:auto;height:auto;max-width:90vw;max-height:90vh;display:block;border-radius:4px}
 </style></head>
 <body>
-    <div class="ctrl"><label>图片</label><input type="range" id="s" min="5" max="100" value="30"/><span id="sl">30%</span></div>
-    <div class="title">${escHtml(link.title || "无标题")}</div>
+    <main>
+    <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span></div>
+    <article>
+    <h1>${escHtml(link.title || "无标题")}</h1>
     <div class="meta">${escHtml(user.username || "匿名")} ${level} · ${formatTs(link.create_at)}${link.ip_location ? ` · ${escHtml(link.ip_location)}` : ""}</div>
-    ${tags ? `<div class="tags">${tags}</div>` : ""}
-    <div class="body">${contentHtml}</div>
-    <div class="ch">💬 评论 (${commentCount})</div>
+    ${tags ? `<div class="tags" aria-label="话题标签">${tags}</div>` : ""}
+    <div class="body" role="article">${contentHtml}</div>
+    </article>
+    <section aria-label="评论区">
+    <h2 class="ch">💬 评论 (${commentCount})</h2>
     ${commentsHtml || (foldedTips ? `<p style="color:var(--dim);font-size:12px">评论已被折叠: ${escHtml(foldedTips)}</p>` : '<p style="color:var(--dim);font-size:12px">暂无评论</p>')}
     ${commentNote ? `<div class="ftr" style="font-style:italic">${escHtml(commentNote)}</div>` : `<div class="ftr">${commentCount} 条评论${foldedTips ? '（已折叠）' : ''}</div>`}
+    </section>
+    </main>
 <script>
 (function(){
 var s=document.getElementById('s'),l=document.getElementById('sl'),r=document.documentElement;

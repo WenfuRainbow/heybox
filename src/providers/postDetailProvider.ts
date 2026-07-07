@@ -23,6 +23,8 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
 
     getCurrentPost(): PostTreeResult | undefined { return this._currentPost; }
 
+    isViewVisible(): boolean { return !!this._view; }
+
     showPost(postTree: PostTreeResult, commentNote?: string, foldedTips?: string): void {
         this._currentPost = postTree;
         this._foldedTips = foldedTips || "";

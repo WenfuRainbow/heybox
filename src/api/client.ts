@@ -17,9 +17,9 @@ export class HeyBoxClient {
 
     loadConfig(): void {
         const config = vscode.workspace.getConfiguration("heybox");
-        this.cookie = config.get<string>("cookie", "");
         this.heyboxId = config.get<string>("heyboxId", "");
-        if (this.cookie) { try { this.context.secrets.store("heybox.cookie", this.cookie); } catch {} }
+        // 每次都重新从 SecretStorage 读取，确保登出后能正确清除
+        this.cookie = "";
         this.refreshCookie();
 
         const storedDeviceId = this.context.globalState.get<string>("deviceId");
@@ -61,14 +61,9 @@ export class HeyBoxClient {
     }
 
     private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
-        if (!this.cookie) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
+        if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
         const url = this.buildUrl(path, params);
-        const headers: Record<string, string> = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            Accept: "*/*", "Accept-Language": "zh-CN,zh;q=0.9",
-            Referer: REFERER, Origin: "https://www.xiaoheihe.cn",
-            Cookie: this.cookie,
-        };
+        const headers = this.buildHeaders();
         return new Promise<T>((resolve, reject) => {
             const req = https.get(url, { headers }, (res) => {
                 let data = "";
@@ -117,7 +112,7 @@ export class HeyBoxClient {
 
     private buildHeaders(): Record<string, string> {
         return {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             Accept: "*/*", "Accept-Language": "zh-CN,zh;q=0.9",
             Referer: REFERER, Origin: "https://www.xiaoheihe.cn",
             Cookie: this.cookie,
@@ -125,7 +120,7 @@ export class HeyBoxClient {
     }
 
     async post<T>(path: string, body: Record<string, string>, params?: Record<string, string>): Promise<T> {
-        if (!this.cookie) throw new Error("请先配置 Cookie");
+        if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie");
         const url = this.buildUrl(path, params);
         const headers = { ...this.buildHeaders(), "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" };
         const bodyStr = Object.entries(body).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
@@ -150,5 +145,62 @@ export class HeyBoxClient {
 
     async favouritePost(linkId: string): Promise<void> {
         await this.post("/bbs/app/link/favour", { link_id: linkId }, { link_id: linkId });
+    }
+
+    /**
+     * 设置并保存 Cookie（仅存储到 SecretStorage，不写入明文 settings）
+     */
+    async setCookie(cookie: string): Promise<void> {
+        this.cookie = cookie;
+        await this.context.secrets.store("heybox.cookie", cookie);
+
+        // 提取 heybox_id 并更新配置
+        if (!this.heyboxId && cookie) {
+            const m = cookie.match(/heybox_id=(\d+)/);
+            if (m) {
+                this.heyboxId = m[1];
+                const config = vscode.workspace.getConfiguration("heybox");
+                await config.update("heyboxId", this.heyboxId, vscode.ConfigurationTarget.Global);
+            }
+        }
+    }
+
+    /**
+     * 验证 Cookie 是否有效（格式检查）
+     */
+    validateCookie(cookie: string): boolean {
+        if (!cookie || typeof cookie !== 'string') return false;
+        const trimmed = cookie.trim();
+        if (trimmed.length === 0) return false;
+
+        return trimmed.includes('heybox_id=') ||
+               trimmed.includes('x_xhh_tokenid=') ||
+               trimmed.includes('user_pkey=');
+    }
+
+    /**
+     * 清除已存储的 Cookie
+     */
+    async clearCookie(): Promise<void> {
+        this.cookie = '';
+        this.heyboxId = '';
+        await this.context.secrets.delete("heybox.cookie");
+
+        const config = vscode.workspace.getConfiguration("heybox");
+        await config.update("heyboxId", "", vscode.ConfigurationTarget.Global);
+    }
+
+    /**
+     * 获取当前 Cookie
+     */
+    getCookie(): string {
+        return this.cookie;
+    }
+
+    /**
+     * 获取扩展上下文
+     */
+    getContext(): vscode.ExtensionContext {
+        return this.context;
     }
 }
