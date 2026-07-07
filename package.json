@@ -7,8 +7,12 @@
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onView:heybox.postList"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:heybox.postList"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
@@ -35,30 +39,108 @@
     },
     "menus": {
       "view/title": [
-        { "command": "heybox.searchPost", "when": "view == heybox.postList || view == heybox.postDetail", "group": "navigation" },
-        { "command": "heybox.refreshList", "when": "view == heybox.postList || view == heybox.postDetail", "group": "navigation" }
+        {
+          "command": "heybox.searchPost",
+          "when": "view == heybox.postList || view == heybox.postDetail",
+          "group": "navigation"
+        },
+        {
+          "command": "heybox.refreshList",
+          "when": "view == heybox.postList || view == heybox.postDetail",
+          "group": "navigation"
+        }
       ],
       "view/item/context": [
-        { "command": "heybox.openInBrowser", "when": "viewItem == post", "group": "0_inline" },
-        { "command": "heybox.toggleFavourite", "when": "viewItem == post", "group": "0_inline" }
+        {
+          "command": "heybox.openInBrowser",
+          "when": "viewItem == post",
+          "group": "0_inline"
+        },
+        {
+          "command": "heybox.toggleFavourite",
+          "when": "viewItem == post",
+          "group": "0_inline"
+        }
       ]
     },
     "commands": [
-      { "command": "heybox.openPost", "title": "打开帖子", "category": "HeyBox" },
-      { "command": "heybox.searchPost", "title": "搜索帖子", "icon": "$(search)", "category": "HeyBox" },
-      { "command": "heybox.exitSearch", "title": "返回话题列表", "category": "HeyBox" },
-      { "command": "heybox.switchToRecommend", "title": "切换到推荐", "category": "HeyBox" },
-      { "command": "heybox.switchToCategories", "title": "切换到板块", "category": "HeyBox" },
-      { "command": "heybox.switchToFavorites", "title": "切换到收藏", "category": "HeyBox" },
-      { "command": "heybox.loadMoreSearch", "title": "加载更多搜索结果", "category": "HeyBox" },
-      { "command": "heybox.loadMoreFeed", "title": "加载更多推荐", "category": "HeyBox" },
-      { "command": "heybox.refreshList", "title": "刷新列表", "icon": "$(refresh)", "category": "HeyBox" },
-      { "command": "heybox.openByUrl", "title": "通过URL打开帖子", "category": "HeyBox" },
-      { "command": "heybox.openInBrowser", "title": "在浏览器中打开", "category": "HeyBox" },
-      { "command": "heybox.toggleFavourite", "title": "收藏/取消收藏", "category": "HeyBox" },
-      { "command": "heybox.loadMore", "title": "加载更多", "category": "HeyBox" },
-      { "command": "heybox.toggleSidebar", "title": "切换侧边栏", "category": "HeyBox" },
-      { "command": "heybox.openClipboardUrl", "title": "从剪贴板URL打开帖子", "category": "HeyBox" }
+      {
+        "command": "heybox.openPost",
+        "title": "打开帖子",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.searchPost",
+        "title": "搜索帖子",
+        "icon": "$(search)",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.exitSearch",
+        "title": "返回话题列表",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.switchToRecommend",
+        "title": "切换到推荐",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.switchToCategories",
+        "title": "切换到板块",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.switchToFavorites",
+        "title": "切换到收藏",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.loadMoreSearch",
+        "title": "加载更多搜索结果",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.loadMoreFeed",
+        "title": "加载更多推荐",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.refreshList",
+        "title": "刷新列表",
+        "icon": "$(refresh)",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.openByUrl",
+        "title": "通过URL打开帖子",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.openInBrowser",
+        "title": "在浏览器中打开",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.toggleFavourite",
+        "title": "收藏/取消收藏",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.loadMore",
+        "title": "加载更多",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.toggleSidebar",
+        "title": "切换侧边栏",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.openClipboardUrl",
+        "title": "从剪贴板URL打开帖子",
+        "category": "HeyBox"
+      }
     ],
     "keybindings": [
       {
@@ -88,28 +170,39 @@
               "id": "setupCookie",
               "title": "1️⃣ 配置 Cookie",
               "description": "点击打开设置，搜索 ``heybox.cookie`` 并粘贴从小黑盒网站复制的 Cookie 值。\n\n**如何获取 Cookie？**\n1. 打开浏览器访问 xiaoheihe.cn 并登录\n2. 按 F12 → Network → 刷新页面\n3. 复制任意请求的 Cookie 头",
-              "completionEvents": ["onSettingChanged:heybox.cookie"],
-              "media": { "markdown": "resources/walkthrough-cookie.md" }
+              "completionEvents": [
+                "onSettingChanged:heybox.cookie"
+              ],
+              "media": {
+                "markdown": "resources/walkthrough-cookie.md"
+              }
             },
             {
               "id": "browse",
               "title": "2️⃣ 浏览帖子",
               "description": "点击侧边栏 HeyBox 图标，展开话题查看帖子列表，或点击 🔍 搜索。点击帖子查看详情。",
-              "completionEvents": ["onCommand:heybox.openPost"],
-              "media": { "markdown": "resources/walkthrough-browse.md" }
+              "completionEvents": [
+                "onCommand:heybox.openPost"
+              ],
+              "media": {
+                "markdown": "resources/walkthrough-browse.md"
+              }
             },
             {
               "id": "stealth",
               "title": "3️⃣ 开启隐身模式",
               "description": "设置 ``heybox.stealthMode: true``，界面伪装为代码片段，适合办公环境。",
-              "completionEvents": ["onSettingChanged:heybox.stealthMode"],
-              "media": { "markdown": "resources/walkthrough-stealth.md" }
+              "completionEvents": [
+                "onSettingChanged:heybox.stealthMode"
+              ],
+              "media": {
+                "markdown": "resources/walkthrough-stealth.md"
+              }
             }
           ]
         }
       ]
     },
-
     "configuration": {
       "title": "HeyBox Forum",
       "properties": {
@@ -141,7 +234,11 @@
         "heybox.postDetailLocation": {
           "type": "string",
           "default": "sidebar",
-          "enum": ["sidebar", "editor", "beside"],
+          "enum": [
+            "sidebar",
+            "editor",
+            "beside"
+          ],
           "enumDescriptions": [
             "在侧边栏/面板区域显示",
             "在编辑区显示",
@@ -161,8 +258,9 @@
     "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
     "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "better-sqlite3": "^12.11.1",
     "typescript": "^5.3.0"
   }
 }
