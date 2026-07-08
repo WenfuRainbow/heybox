@@ -56,6 +56,8 @@ export class PostListProvider
     private feedOffset: number = 0;
     private feedLoading: boolean = false;
 
+    private favCache: Map<number, number> = new Map();
+
     constructor(private client: HeyBoxClient) {}
 
     dispose(): void {
@@ -69,6 +71,7 @@ export class PostListProvider
         this.topicOffsets.clear();
         this.feedPosts = [];
         this.feedOffset = 0;
+        this.favCache.clear();
         this._onDidChangeTreeData.fire();
     }
 
@@ -127,14 +130,14 @@ export class PostListProvider
             ];
             if (this.viewMode === "recommend") {
                 if (this.feedPosts.length === 0 && !this.feedLoading) await this.fetchFeed();
-                tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None)));
+                tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
                 tabs.push(new LoadMoreFeedItem());
             } else if (this.viewMode === "favorites") {
                 const favs = getFavs(this.client.getContext());
                 if (favs.length === 0) {
                     tabs.push(new TabEmptyItem("暂无收藏，右键帖子可以收藏"));
                 } else {
-                    tabs.push(...favs.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None)));
+                    tabs.push(...favs.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
                 }
             } else {
                 if (this.topics.length === 0) await this.fetchTopics();
@@ -146,7 +149,7 @@ export class PostListProvider
         if (element instanceof TopicItem) {
             const tid = element.topic.topic_id;
             if (!this.topicPosts.has(tid)) await this.fetchTopicPosts(tid);
-            const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None));
+            const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache));
             items.push(new LoadMoreTopicItem(tid));
             return items;
         }
@@ -160,7 +163,7 @@ export class PostListProvider
                 items.push(new BusyItem("搜索中..."));
                 this.loadMoreSearchResults();
             }
-            items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None)));
+            items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
             if (this.searchResults.length > 0) items.push(new LoadMoreSearchItem());
             return items;
         }
@@ -176,6 +179,7 @@ export class PostListProvider
             this.feedOffset = this.feedPosts.length;
         } catch (e) { vscode.window.showErrorMessage(`获取推荐失败: ${(e as Error).message}`); }
         finally { this.feedLoading = false; }
+        this.fetchFavCounts(this.feedPosts);
     }
 
     private async fetchTopics(): Promise<void> {
@@ -198,6 +202,21 @@ export class PostListProvider
             this.topicOffsets.set(topicId, offset + newPosts.length);
         } catch (e) { vscode.window.showErrorMessage(`获取帖子列表失败: ${(e as Error).message}`); }
         finally { this.loadingTopicsSet.delete(topicId); }
+        this.fetchFavCounts(this.topicPosts.get(topicId) || []);
+    }
+
+    private async fetchFavCounts(posts: SearchItemInfo[]): Promise<void> {
+        const toFetch = posts.filter(p => !this.favCache.has(p.linkid));
+        for (let i = 0; i < toFetch.length; i += 5) {
+            const batch = toFetch.slice(i, i + 5);
+            await Promise.all(batch.map(async (p) => {
+                try {
+                    const tree = await this.client.getPostTree(String(p.linkid), 0, 0);
+                    this.favCache.set(p.linkid, tree.link.favour_count);
+                } catch {}
+            }));
+        }
+        this._onDidChangeTreeData.fire();
     }
 
     async loadMorePosts(topicId: number): Promise<void> {
@@ -269,13 +288,14 @@ export class TopicItem extends TreeItemBase {
 
 export class PostItem extends TreeItemBase {
     public readonly post: SearchItemInfo;
-    constructor(post: SearchItemInfo, collapsibleState: vscode.TreeItemCollapsibleState) {
+    constructor(post: SearchItemInfo, collapsibleState: vscode.TreeItemCollapsibleState, favCache?: Map<number, number>) {
         const label = post.title || post.description?.substring(0, 40) || "无标题";
         super(label, collapsibleState);
         this.post = post;
+        const fav = favCache?.get(post.linkid);
         const minimal = vscode.workspace.getConfiguration("heybox").get<boolean>("minimalMode", false);
-        if (!minimal) this.description = `👍${post.up} 💬${post.comment_num}`;
-        this.tooltip = new vscode.MarkdownString(`**${label}**\n\n${post.description?.substring(0, 100) || ""}\n\n点赞: ${post.up} | 评论: ${post.comment_num}\n话题: ${post.topics?.map((t) => t.name).join(", ") || "无"}`);
+        if (!minimal) this.description = fav !== undefined ? `⭐${fav} 💬${post.comment_num}` : `💬${post.comment_num}`;
+        this.tooltip = new vscode.MarkdownString(`**${label}**\n\n${post.description?.substring(0, 100) || ""}\n\n${fav !== undefined ? '收藏: ' + fav + ' | ' : ''}评论: ${post.comment_num}\n话题: ${post.topics?.map((t) => t.name).join(", ") || "无"}`);
         this.command = { command: "heybox.openPost", title: "打开帖子", arguments: [post] };
         this.contextValue = "post";
         this.iconPath = minimal ? new vscode.ThemeIcon("file") : new vscode.ThemeIcon("comment-discussion");

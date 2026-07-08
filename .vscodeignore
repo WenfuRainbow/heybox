@@ -1,5 +1,6 @@
 .vscode/**
 .vscode-test/**
+.vscode/**
 src/**
 node_modules/**
 test**
@@ -11,3 +12,5 @@ crypto.js
 topic_*.js
 tsconfig.json
 LICENSE
+.mimocode/**
+.gitignore

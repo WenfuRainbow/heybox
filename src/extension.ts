@@ -10,8 +10,9 @@ let postListProvider: PostListProvider | undefined;
 let currentPanel: vscode.WebviewPanel | undefined;
 const MAX_HISTORY = 50;
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
     const client = new HeyBoxClient(context);
+    await client.loadConfig();
     postListProvider = new PostListProvider(client);
 
     const treeView = vscode.window.createTreeView("heybox.postList", {
@@ -22,12 +23,10 @@ export function activate(context: vscode.ExtensionContext): void {
     postDetailProvider = new PostDetailViewProvider(context.extensionUri);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
-    client.refreshCookie().then(() => {
-        checkCookieAndPrompt(context, client);
-    });
+    checkCookieAndPrompt(context, client);
     applyStealthMode();
 
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", () => { client.loadConfig(); postListProvider!.refresh(); }));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", async () => { await client.loadConfig(); postListProvider!.refresh(); }));
     context.subscriptions.push(vscode.commands.registerCommand("heybox.searchPost", async () => {
         const q = await vscode.window.showInputBox({ prompt: "搜索帖子", placeHolder: "输入关键词", ignoreFocusOut: true });
         if (q?.trim()) await postListProvider!.performSearch(q.trim());
@@ -129,8 +128,8 @@ export function activate(context: vscode.ExtensionContext): void {
         await openAndShowPost(context, client, m[1]);
     }));
 
-    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((e) => {
-        if (e.affectsConfiguration("heybox")) { client.loadConfig(); applyStealthMode(); postListProvider!.refresh(); }
+    context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (e) => {
+        if (e.affectsConfiguration("heybox")) { await client.loadConfig(); applyStealthMode(); postListProvider!.refresh(); }
     }));
 }
 

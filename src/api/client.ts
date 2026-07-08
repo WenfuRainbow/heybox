@@ -13,14 +13,14 @@ export class HeyBoxClient {
     private deviceId: string = "";
     private heyboxId: string = "";
 
-    constructor(private context: vscode.ExtensionContext) { this.loadConfig(); }
+    constructor(private context: vscode.ExtensionContext) {}
 
-    loadConfig(): void {
+    async loadConfig(): Promise<void> {
         const config = vscode.workspace.getConfiguration("heybox");
         this.heyboxId = config.get<string>("heyboxId", "");
         // 每次都重新从 SecretStorage 读取，确保登出后能正确清除
         this.cookie = "";
-        this.refreshCookie();
+        await this.refreshCookie();
 
         const storedDeviceId = this.context.globalState.get<string>("deviceId");
         const configDeviceId = config.get<string>("deviceId", "");

@@ -85,8 +85,10 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
 <style>
     :root{--bg:var(--vscode-editor-background,#1e1e1e);--fg:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#9d9d9d);--border:var(--vscode-panel-border,#333);--badge-bg:var(--vscode-badge-background,#4d4d4d);--badge-fg:var(--vscode-badge-foreground,#fff);--input-bg:var(--vscode-input-background,#3c3c3c);--font:var(--vscode-font-family);--fs:var(--vscode-font-size,13px);--scale:1}
     *{margin:0;padding:0;box-sizing:border-box}
-    body{font-family:var(--font);font-size:var(--fs);background:var(--bg);color:var(--fg);padding:16px 24px;line-height:1.6}
-    .ctrl{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim);padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:16px}
+    html,body{height:100%;overflow:hidden}
+    body{font-family:var(--font);font-size:var(--fs);background:var(--bg);color:var(--fg);line-height:1.6;display:flex;flex-direction:column}
+    .ctrl{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim);padding:8px 24px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0}
+    main{flex:1;overflow-y:auto;padding:16px 24px}
     .ctrl label{white-space:nowrap}
     .ctrl input{flex:1;max-width:160px;accent-color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer}
     h1{font-size:22px;font-weight:700;margin-bottom:10px}
@@ -112,8 +114,8 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .img-preview img{width:auto;height:auto;max-width:90vw;max-height:90vh;display:block;border-radius:4px}
 </style></head>
 <body>
-    <main>
     <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span></div>
+    <main>
     <article>
     <h1>${escHtml(link.title || "无标题")}</h1>
     <div class="meta">${escHtml(user.username || "匿名")} ${level} · ${formatTs(link.create_at)}${link.ip_location ? ` · ${escHtml(link.ip_location)}` : ""}</div>
