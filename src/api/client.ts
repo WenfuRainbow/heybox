@@ -60,6 +60,25 @@ export class HeyBoxClient {
         return `${API_BASE}${path}?${Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&")}`;
     }
 
+    private async getRaw(path: string, params?: Record<string, string>): Promise<ApiResponse<unknown>> {
+        if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
+        const url = this.buildUrl(path, params);
+        const headers = this.buildHeaders();
+        return new Promise<ApiResponse<unknown>>((resolve, reject) => {
+            const req = https.get(url, { headers }, (res) => {
+                let data = "";
+                res.on("data", (c) => (data += c));
+                res.on("end", () => {
+                    try { resolve(JSON.parse(data)); }
+                    catch { reject(new Error(`解析响应失败: ${data.substring(0, 200)}`)); }
+                });
+                res.on("error", reject);
+            });
+            req.setTimeout(15000, () => { req.destroy(); reject(new Error("请求超时")); });
+            req.on("error", (e: NodeJS.ErrnoException) => reject(new Error(`网络错误: ${e.message}`)));
+        });
+    }
+
     private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
         if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
         const url = this.buildUrl(path, params);
@@ -145,6 +164,18 @@ export class HeyBoxClient {
 
     async favouritePost(linkId: string): Promise<void> {
         await this.post("/bbs/app/link/favour", { link_id: linkId }, { link_id: linkId });
+    }
+
+    async signDaily(): Promise<{ success: boolean; streak: number; message: string }> {
+        const res = await this.getRaw("/task/sign/");
+        if (res.status === "ok") {
+            const r = res.result as { sign_in_streak?: number };
+            return { success: true, streak: r.sign_in_streak || 0, message: "签到成功" };
+        }
+        if (res.status === "login") {
+            return { success: false, streak: 0, message: "今日已签到" };
+        }
+        throw new Error(res.msg || "签到失败");
     }
 
     /**

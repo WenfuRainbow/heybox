@@ -38,6 +38,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreSearch", async () => postListProvider!.loadMoreSearch()));
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMore", async (t: number) => postListProvider!.loadMorePosts(t)));
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFeed", async () => postListProvider!.loadMoreFeed()));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.signDaily", async () => {
+        try {
+            const result = await client.signDaily();
+            if (result.success) {
+                vscode.window.showInformationMessage(`签到成功！连续签到 ${result.streak} 天`);
+            } else {
+                vscode.window.showInformationMessage(result.message);
+            }
+        } catch (e) {
+            vscode.window.showErrorMessage(`签到失败: ${(e as Error).message}`);
+        }
+    }));
 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.openPost", async (post: SearchItemInfo) => {
         if (!post?.linkid) return;
