@@ -1,6 +1,10 @@
 import * as vscode from "vscode";
 import { PostTreeResult, Comment } from "../types";
 
+/**
+ * 根据用户配置的主题偏好返回 CSS 变量覆盖字符串
+ * "auto" 模式下返回空串，由 VSCode 主题的 CSS 变量接管
+ */
 function getThemeOverrides(): string {
     const theme = vscode.workspace.getConfiguration("heybox").get<string>("theme", "auto");
     if (theme === "dark") {
@@ -11,7 +15,8 @@ function getThemeOverrides(): string {
     return "";
 }
 
-export function formatTs(ts: number): string {
+/** 将 Unix 时间戳转换为"刚刚"、"X分钟前"等相对时间文案 */
+function formatTs(ts: number): string {
     if (!ts) return "";
     const diff = Math.floor(Date.now() / 1000) - ts;
     if (diff < 60) return "刚刚";
@@ -31,12 +36,17 @@ export function formatTs(ts: number): string {
     return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
-export function escHtml(s: string): string {
+/** HTML 实体转义，防止 XSS 注入 */
+function escHtml(s: string): string {
     if (!s) return "";
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
-export function renderContent(text: string): string {
+/**
+ * 渲染帖子正文内容
+ * 支持两种格式：JSON 数组（含 img/text 类型块）和纯文本
+ */
+function renderContent(text: string): string {
     if (!text) return "";
     try {
         const blocks = JSON.parse(text);
@@ -51,7 +61,8 @@ export function renderContent(text: string): string {
     return `<p>${escHtml(text)}</p>`;
 }
 
-export function renderCommentHtml(c: Comment, sub: boolean, stealth: boolean): string {
+/** 将单条评论渲染为 HTML article 元素，sub 表示是否为子评论（回复） */
+function renderCommentHtml(c: Comment, sub: boolean, stealth: boolean): string {
     const level = c.user.level_info?.status === 1 ? `Lv.${c.user.level_info.level}` : "";
     const replyto = c.replyuser ? `<span class="rpl">${escHtml(c.replyuser.username)}</span>` : "";
     const imgs = (c.imgs || []).map((i) => `<img class="cimg" src="${escHtml(i.url)}" alt="评论图片" loading="lazy" />`).join("");
@@ -59,6 +70,25 @@ export function renderCommentHtml(c: Comment, sub: boolean, stealth: boolean): s
     return `<article class="cm${sub ? " sub" : ""}" aria-label="${escHtml(c.user.username)} 的评论">${avatar}<div class="cbd"><div class="chd">${escHtml(c.user.username)} ${level ? `<span class="clv">${level}</span>` : ""} <span class="flr">#${c.floor_num}</span> ${replyto}</div><div class="cmeta">${formatTs(c.create_at)}${c.ip_location ? ` · ${escHtml(c.ip_location)}` : ""}${!stealth ? ` · 👍${c.up}` : ""}</div><div class="ct">${escHtml(c.text || "")}</div>${imgs}</div></article>`;
 }
 
+/**
+ * 生成帖子详情的完整 HTML 页面
+ *
+ * 页面结构：
+ *   <head>  — CSP 安全策略 + CSS 样式（基于 VSCode 主题变量）
+ *   <body>
+ *     .ctrl — 图片缩放滑块（通过 CSS 变量 --scale 控制图片最大宽度）
+ *     <main>
+ *       <article>  — 帖子标题、作者信息、话题标签、正文
+ *       <section>  — 评论区：评论组（主评论 + 子评论）
+ *     </main>
+ *   <script> — 图片缩放逻辑 + 鼠标悬停大图预览
+ *
+ * @param postTree 帖子完整数据（正文 + 评论组）
+ * @param stealth 隐身模式：隐藏头像、点赞数，面板标题伪装为 README.md
+ * @param commentNote 评论区底部备注
+ * @param foldedTips 被折叠评论的提示文案
+ * @returns 完整的 HTML 字符串
+ */
 export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote?: string, foldedTips?: string): string {
     const link = postTree.link;
     const user = link.user;

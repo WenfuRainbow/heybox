@@ -1,3 +1,8 @@
+/**
+ * HeyBox API 客户端模块
+ * 封装了与小黑盒 API 的所有交互，包括用户认证、帖子操作、签到等功能
+ */
+
 import * as vscode from "vscode";
 import * as https from "https";
 import { generateSignature, Signature } from "./signature";
@@ -9,6 +14,10 @@ import {
 const API_BASE = "https://api.xiaoheihe.cn";
 const REFERER = "https://www.xiaoheihe.cn/";
 
+/**
+ * HeyBox API 客户端类
+ * 提供与小黑盒服务器通信的方法，处理认证、请求签名和数据解析
+ */
 export class HeyBoxClient {
     private cookie: string = "";
     private deviceId: string = "";
@@ -16,6 +25,11 @@ export class HeyBoxClient {
 
     constructor(private context: vscode.ExtensionContext) {}
 
+    /**
+     * 加载配置信息
+     * 从 VSCode 设置和 SecretStorage 中读取用户配置，包括 cookie、设备 ID 和 heybox ID
+     * 如果设备 ID 不存在则自动生成并存储
+     */
     async loadConfig(): Promise<void> {
         const config = vscode.workspace.getConfiguration("heybox");
         this.heyboxId = config.get<string>("heyboxId", "");
@@ -35,17 +49,31 @@ export class HeyBoxClient {
         }
     }
 
+    /**
+     * 刷新 Cookie
+     * 从 SecretStorage 中重新读取 cookie，如果已存在则跳过
+     */
     async refreshCookie(): Promise<void> {
         if (this.cookie) return;
         try { const s = await this.context.secrets.get("heybox.cookie"); if (s) this.cookie = s; } catch {}
     }
 
+    /**
+     * 生成随机设备 ID
+     * 创建一个 32 位的十六进制字符串作为设备标识符
+     * @returns 32 位随机十六进制字符串
+     */
     private generateDeviceId(): string {
         let r = ""; const h = "0123456789abcdef";
         for (let i = 0; i < 32; i++) r += h[Math.floor(Math.random() * 16)];
         return r;
     }
 
+    /**
+     * 获取公共请求参数
+     * 返回所有 API 请求都需要的通用参数，包括客户端信息和设备标识
+     * @returns 包含公共参数的对象
+     */
     private getCommonParams(): Record<string, string> {
         return {
             os_type: "web", app: "heybox", client_type: "web", version: "999.0.4",
@@ -55,12 +83,40 @@ export class HeyBoxClient {
         };
     }
 
+    /**
+     * 构建完整的 API URL
+     * 将路径、签名和额外参数组合成完整的请求 URL
+     * @param path API 路径
+     * @param extraParams 额外的查询参数
+     * @returns 完整的 URL 字符串
+     */
     private buildUrl(path: string, extraParams?: Record<string, string>): string {
         const sig: Signature = generateSignature(path);
         const params = { ...this.getCommonParams(), hkey: sig.hkey, _time: String(sig._time), nonce: sig.nonce, ...(extraParams || {}) };
         return `${API_BASE}${path}?${Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&")}`;
     }
 
+    /**
+     * 构建 HTTP 请求头
+     * 包含浏览器模拟信息、Cookie 和必要的请求头
+     * @returns 请求头对象
+     */
+    private buildHeaders(): Record<string, string> {
+        return {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            Accept: "*/*", "Accept-Language": "zh-CN,zh;q=0.9",
+            Referer: REFERER, Origin: "https://www.xiaoheihe.cn",
+            Cookie: this.cookie,
+        };
+    }
+
+    /**
+     * 发送 GET 请求并返回原始响应
+     * 不解析业务状态，直接返回 API 原始响应数据
+     * @param path API 路径
+     * @param params 查询参数
+     * @returns 原始 API 响应
+     */
     private async getRaw(path: string, params?: Record<string, string>): Promise<ApiResponse<unknown>> {
         if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
         const url = this.buildUrl(path, params);
@@ -80,6 +136,13 @@ export class HeyBoxClient {
         });
     }
 
+    /**
+     * 发送 GET 请求并解析业务数据
+     * 自动检查 API 响应状态，处理登录过期等错误
+     * @param path API 路径
+     * @param params 查询参数
+     * @returns 解析后的业务数据
+     */
     private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
         if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
         const url = this.buildUrl(path, params);
@@ -107,6 +170,14 @@ export class HeyBoxClient {
         });
     }
 
+    /**
+     * 获取帖子树（帖子详情和回复）
+     * @param linkId 帖子链接 ID
+     * @param offset 分页偏移量，默认 0
+     * @param limit 返回数量限制，默认 0（无限制）
+     * @param sortFilter 排序筛选条件
+     * @returns 帖子树数据
+     */
     async getPostTree(linkId: string, offset: number = 0, limit: number = 0, sortFilter?: string): Promise<PostTreeResult> {
         const p: Record<string, string> = { link_id: linkId, offset: String(offset) };
         if (limit > 0) p.limit = String(limit);
@@ -114,31 +185,54 @@ export class HeyBoxClient {
         return this.get<PostTreeResult>("/bbs/app/link/tree", p);
     }
 
+    /**
+     * 搜索帖子
+     * @param query 搜索关键词
+     * @param page 页码，默认 1
+     * @param limit 每页数量，默认 20
+     * @returns 搜索结果
+     */
     async searchPosts(query: string, page: number = 1, limit: number = 20): Promise<SearchResult> {
         return this.get<SearchResult>("/bbs/app/api/general/search/v1/web", { q: query, search_type: "link", page: String(page), limit: String(limit) });
     }
 
+    /**
+     * 获取话题动态
+     * @param topicId 话题 ID
+     * @param offset 分页偏移量，默认 0
+     * @param limit 返回数量限制，默认 30
+     * @returns 话题动态列表
+     */
     async getTopicFeeds(topicId: number, offset: number = 0, limit: number = 30): Promise<{ links: SearchItemInfo[]; lastval: string }> {
         return this.get<{ links: SearchItemInfo[]; lastval: string }>("/bbs/app/topic/feeds", { topic_id: String(topicId), offset: String(offset), limit: String(limit) });
     }
 
+    /**
+     * 获取首页动态
+     * @param offset 分页偏移量，默认 0
+     * @param pull 拉取模式，默认 "0"
+     * @returns 首页动态列表
+     */
     async getFeed(offset: number = 0, pull: string = "0"): Promise<{ links: SearchItemInfo[] }> {
         return this.get<{ links: SearchItemInfo[] }>("/bbs/app/feeds", { offset: String(offset), pull, dw: "800" });
     }
 
+    /**
+     * 获取话题分类列表
+     * @returns 话题分类数据
+     */
     async getTopicCategories(): Promise<TopicCategoryResult> {
         return this.get<TopicCategoryResult>("/bbs/app/topic/categories");
     }
 
-    private buildHeaders(): Record<string, string> {
-        return {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            Accept: "*/*", "Accept-Language": "zh-CN,zh;q=0.9",
-            Referer: REFERER, Origin: "https://www.xiaoheihe.cn",
-            Cookie: this.cookie,
-        };
-    }
-
+    /**
+     * 发送 POST 请求
+     * 自动构建请求体和签名，处理响应解析
+     * @param path API 路径
+     * @param body POST 请求体
+     * @param params 额外的查询参数
+     * @returns 解析后的业务数据
+     */
     async post<T>(path: string, body: Record<string, string>, params?: Record<string, string>): Promise<T> {
         if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie");
         const url = this.buildUrl(path, params);
@@ -163,10 +257,19 @@ export class HeyBoxClient {
         });
     }
 
+    /**
+     * 收藏帖子
+     * @param linkId 帖子链接 ID
+     */
     async favouritePost(linkId: string): Promise<void> {
         await this.post("/bbs/app/link/favour", { link_id: linkId }, { link_id: linkId });
     }
 
+    /**
+     * 执行每日签到
+     * 先尝试签到，然后检查签到状态并返回结果
+     * @returns 签到结果，包含成功状态、消息和连续签到天数
+     */
     async signDaily(): Promise<{ ok: boolean; message: string; state?: string }> {
         const signResp = await this.getRaw("/task/sign_v3/sign");
         const firstState = (signResp.result as any)?.state as string | undefined;
@@ -188,10 +291,21 @@ export class HeyBoxClient {
         return { ok: false, message: (typeof stateResp.msg === "string" ? stateResp.msg : "") || state || "签到失败" };
     }
 
+    /**
+     * 获取任务列表
+     * @returns 任务列表数据
+     */
     async getTaskList(): Promise<SignTaskListResult> {
         return this.get<SignTaskListResult>("/task/list_v2/");
     }
 
+    /**
+     * 获取用户消息列表
+     * @param listType 消息类型，默认 0
+     * @param offset 分页偏移量，默认 0
+     * @param limit 返回数量限制，默认 20
+     * @returns 消息列表数据
+     */
     async getMessages(listType: number = 0, offset: number = 0, limit: number = 20): Promise<MessageListResult> {
         return this.get<MessageListResult>("/bbs/app/user/message", {
             list_type: String(listType),
@@ -203,6 +317,8 @@ export class HeyBoxClient {
 
     /**
      * 设置并保存 Cookie（仅存储到 SecretStorage，不写入明文 settings）
+     * 同时从 cookie 中提取 heybox_id 并更新配置
+     * @param cookie 要保存的 cookie 字符串
      */
     async setCookie(cookie: string): Promise<void> {
         this.cookie = cookie;
@@ -221,6 +337,9 @@ export class HeyBoxClient {
 
     /**
      * 验证 Cookie 是否有效（格式检查）
+     * 检查 cookie 是否包含必要的认证字段
+     * @param cookie 要验证的 cookie 字符串
+     * @returns 是否有效
      */
     validateCookie(cookie: string): boolean {
         if (!cookie || typeof cookie !== 'string') return false;
@@ -234,6 +353,7 @@ export class HeyBoxClient {
 
     /**
      * 清除已存储的 Cookie
+     * 同时清除内存中的 cookie 和 SecretStorage 中的存储，并重置 heybox_id
      */
     async clearCookie(): Promise<void> {
         this.cookie = '';
@@ -246,6 +366,7 @@ export class HeyBoxClient {
 
     /**
      * 获取当前 Cookie
+     * @returns 当前保存的 cookie 字符串
      */
     getCookie(): string {
         return this.cookie;
@@ -253,6 +374,7 @@ export class HeyBoxClient {
 
     /**
      * 获取扩展上下文
+     * @returns VSCode 扩展上下文对象
      */
     getContext(): vscode.ExtensionContext {
         return this.context;

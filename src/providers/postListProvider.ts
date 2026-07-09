@@ -2,18 +2,24 @@ import * as vscode from "vscode";
 import { HeyBoxClient } from "../api/client";
 import { SearchItemInfo, TopicChild } from "../types";
 
+/** 视图模式：推荐流 / 板块分类 / 收藏夹 */
 type ViewMode = "recommend" | "categories" | "favorites";
 
-const FAV_KEY = "heybox.favorites";
-const EXPANDED_KEY = "heybox.expandedTopics";
-const LAST_POST_KEY = "heybox.lastPostId";
+const FAV_KEY = "heybox.favorites";          // 全局状态中收藏夹的存储键
+const EXPANDED_KEY = "heybox.expandedTopics"; // 已展开话题的持久化键
+const LAST_POST_KEY = "heybox.lastPostId";    // 上次阅读帖子的持久化键
 const MAX_SEARCH_RESULTS = 200; // 搜索结果上限，防止内存无限增长
 
+/** 从全局状态中读取收藏列表 */
 function getFavs(context?: vscode.ExtensionContext): SearchItemInfo[] {
     if (!context) return [];
     return context.globalState.get<SearchItemInfo[]>(FAV_KEY, []);
 }
 
+/**
+ * 切换帖子的收藏状态：已收藏则取消，未收藏则添加到列表首位
+ * @returns 更新后的完整收藏列表
+ */
 export function toggleFav(context: vscode.ExtensionContext, post: SearchItemInfo): SearchItemInfo[] {
     const favs = getFavs(context);
     const idx = favs.findIndex((f) => f.linkid === post.linkid);
@@ -26,67 +32,95 @@ export function toggleFav(context: vscode.ExtensionContext, post: SearchItemInfo
     return favs;
 }
 
-export { getFavs, FAV_KEY };
+export { getFavs };
 
+/**
+ * 帖子列表的 TreeView 数据提供者
+ * 支持三种视图模式（推荐/板块/收藏）以及搜索模式，
+ * 负责懒加载帖子数据并驱动侧边栏树的刷新。
+ */
 export class PostListProvider
     implements vscode.TreeDataProvider<TreeItemBase>
 {
+    /** 树数据变更事件发射器，触发后 VSCode 会重新调用 getChildren */
     private _onDidChangeTreeData = new vscode.EventEmitter<
         TreeItemBase | undefined | void
     >();
     readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
+    /** 当前激活的视图模式 */
     private viewMode: ViewMode = "categories";
 
     getViewMode(): ViewMode {
         return this.viewMode;
     }
 
+    /** 板块列表数据 */
     private topics: TopicChild[] = [];
+    /** 各板块下已加载的帖子缓存，key = topic_id */
     private topicPosts: Map<number, SearchItemInfo[]> = new Map();
+    /** 各板块的分页偏移量，用于加载更多 */
     private topicOffsets: Map<number, number> = new Map();
+    /** 板块列表是否正在加载中（防止重复请求） */
     private loadingTopics: boolean = false;
+    /** 正在加载帖子的板块 ID 集合（防止同一板块重复请求） */
     private loadingTopicsSet: Set<number> = new Set();
 
+    /** 是否处于搜索模式 */
     private searchMode: boolean = false;
+    /** 搜索结果列表 */
     private searchResults: SearchItemInfo[] = [];
+    /** 当前搜索关键词 */
     private searchQuery: string = "";
+    /** 搜索的当前页码（从 1 开始） */
     private searchPage: number = 0;
+    /** 搜索是否正在加载中 */
     private searchLoading: boolean = false;
 
+    /** 推荐流帖子列表 */
     private feedPosts: SearchItemInfo[] = [];
+    /** 推荐流的分页偏移量 */
     private feedOffset: number = 0;
+    /** 推荐流是否正在加载中 */
     private feedLoading: boolean = false;
 
+    /** 帖子收藏数缓存，key = linkid, value = favour_count */
     private favCache: Map<number, number> = new Map();
 
     private ctx?: vscode.ExtensionContext;
     private treeView?: vscode.TreeView<TreeItemBase>;
+    /** 已展开的话题 ID 集合，刷新后自动恢复展开状态 */
     private expandedTopics: Set<number> = new Set();
 
     constructor(private client: HeyBoxClient) {}
 
+    /** 注入扩展上下文并恢复已展开话题的状态 */
     setContext(context: vscode.ExtensionContext): void {
         this.ctx = context;
         this.expandedTopics = new Set(context.globalState.get<number[]>(EXPANDED_KEY, []));
     }
 
+    /** 绑定 TreeView 实例，用于控制面板展开等操作 */
     setTreeView(tv: vscode.TreeView<TreeItemBase>): void {
         this.treeView = tv;
     }
 
+    /** 将当前已展开话题的 ID 列表持久化到 globalState */
     saveExpanded(): void {
         if (this.ctx) this.ctx.globalState.update(EXPANDED_KEY, [...this.expandedTopics]);
     }
 
+    /** 记录上次阅读的帖子 ID，用于恢复上下文 */
     saveLastPost(linkid: number): void {
         if (this.ctx) this.ctx.globalState.update(LAST_POST_KEY, linkid);
     }
 
+    /** 释放事件发射器资源 */
     dispose(): void {
         this._onDidChangeTreeData.dispose();
     }
 
+    /** 重置所有缓存数据并触发树刷新 */
     refresh(): void {
         this.exitSearch();
         this.topics = [];
@@ -100,6 +134,7 @@ export class PostListProvider
 
     get isSearchMode(): boolean { return this.searchMode; }
 
+    /** 退出搜索模式，清空搜索状态 */
     exitSearch(): void {
         this.searchMode = false;
         this.searchResults = [];
@@ -107,12 +142,17 @@ export class PostListProvider
         this.searchPage = 0;
     }
 
+    /** 切换视图模式并刷新树 */
     switchTo(viewMode: ViewMode): void {
         this.viewMode = viewMode;
         this.exitSearch();
         this._onDidChangeTreeData.fire();
     }
 
+    /**
+     * 执行搜索：重置搜索状态，加载第一页结果，然后刷新树
+     * @param query 搜索关键词
+     */
     async performSearch(query: string): Promise<void> {
         if (!query || this.searchLoading) return;
         this.searchQuery = query;
@@ -123,6 +163,7 @@ export class PostListProvider
         this._onDidChangeTreeData.fire();
     }
 
+    /** 加载下一页搜索结果，受 MAX_SEARCH_RESULTS 上限约束 */
     async loadMoreSearchResults(): Promise<void> {
         if (this.searchLoading) return;
         if (this.searchResults.length >= MAX_SEARCH_RESULTS) return;
@@ -143,6 +184,12 @@ export class PostListProvider
 
     getTreeItem(element: TreeItemBase): vscode.TreeItem { return element; }
 
+    /**
+     * 核心方法：根据当前状态返回树节点的子元素
+     * - 搜索模式下委托给 getSearchChildren
+     * - 根节点：根据 viewMode 返回三个 Tab + 对应内容
+     * - 板块节点：懒加载该板块下的帖子列表
+     */
     async getChildren(element?: TreeItemBase): Promise<TreeItemBase[]> {
         if (this.searchMode) return this.getSearchChildren(element);
         if (!element) {
@@ -195,6 +242,7 @@ export class PostListProvider
         return [];
     }
 
+    /** 获取推荐流帖子，使用 offset 分页追加 */
     private async fetchFeed(): Promise<void> {
         if (this.feedLoading) return;
         this.feedLoading = true;
@@ -207,6 +255,7 @@ export class PostListProvider
         this.fetchFavCounts(this.feedPosts);
     }
 
+    /** 获取板块分类列表（仅加载一次） */
     private async fetchTopics(): Promise<void> {
         if (this.loadingTopics) return;
         this.loadingTopics = true;
@@ -216,6 +265,7 @@ export class PostListProvider
         finally { this.loadingTopics = false; }
     }
 
+    /** 懒加载指定板块下的帖子列表，支持分页追加 */
     private async fetchTopicPosts(topicId: number): Promise<void> {
         if (this.loadingTopicsSet.has(topicId)) return;
         this.loadingTopicsSet.add(topicId);
@@ -232,6 +282,10 @@ export class PostListProvider
         this.fetchFavCounts(this.topicPosts.get(topicId) || []);
     }
 
+    /**
+     * 批量获取帖子的收藏数，每批 5 个并发请求
+     * 结果缓存到 favCache，用于在树项上显示收藏图标
+     */
     private async fetchFavCounts(posts: SearchItemInfo[]): Promise<void> {
         const toFetch = posts.filter(p => !this.favCache.has(p.linkid));
         for (let i = 0; i < toFetch.length; i += 5) {
@@ -246,24 +300,29 @@ export class PostListProvider
         this._onDidChangeTreeData.fire();
     }
 
+    /** 加载更多指定板块的帖子 */
     async loadMorePosts(topicId: number): Promise<void> {
         await this.fetchTopicPosts(topicId);
         this._onDidChangeTreeData.fire();
     }
 
+    /** 加载更多搜索结果 */
     async loadMoreSearch(): Promise<void> {
         await this.loadMoreSearchResults();
         this._onDidChangeTreeData.fire();
     }
 
+    /** 加载更多推荐流帖子 */
     async loadMoreFeed(): Promise<void> {
         await this.fetchFeed();
         this._onDidChangeTreeData.fire();
     }
 }
 
+/** 所有树节点的基类 */
 export class TreeItemBase extends vscode.TreeItem {}
 
+/** 搜索模式下返回板块列表的导航项 */
 export class BackToTopicsItem extends TreeItemBase {
     constructor() {
         super("← 返回话题列表", vscode.TreeItemCollapsibleState.None);
@@ -273,6 +332,7 @@ export class BackToTopicsItem extends TreeItemBase {
     }
 }
 
+/** 搜索结果头部，显示当前搜索关键词 */
 export class SearchHeaderItem extends TreeItemBase {
     constructor(query: string) {
         super(query, vscode.TreeItemCollapsibleState.None);
@@ -282,6 +342,7 @@ export class SearchHeaderItem extends TreeItemBase {
     }
 }
 
+/** 视图模式切换 Tab（推荐/板块/收藏），激活态显示不同图标和标记 */
 export class TabItem extends TreeItemBase {
     constructor(mode: ViewMode, active: boolean) {
         const labels: Record<ViewMode, [string, string]> = {
@@ -303,6 +364,7 @@ export class TabItem extends TreeItemBase {
     }
 }
 
+/** 板块分类树节点，可展开查看该板块下的帖子 */
 export class TopicItem extends TreeItemBase {
     constructor(public readonly topic: TopicChild, collapsibleState: vscode.TreeItemCollapsibleState) {
         const minimal = vscode.workspace.getConfiguration("heybox").get<boolean>("minimalMode", false);
@@ -313,6 +375,7 @@ export class TopicItem extends TreeItemBase {
     }
 }
 
+/** 帖子树节点，显示标题、收藏数和评论数，点击打开帖子详情 */
 export class PostItem extends TreeItemBase {
     public readonly post: SearchItemInfo;
     constructor(post: SearchItemInfo, collapsibleState: vscode.TreeItemCollapsibleState, favCache?: Map<number, number>) {
@@ -329,6 +392,7 @@ export class PostItem extends TreeItemBase {
     }
 }
 
+/** 板块内的"加载更多"按钮，点击触发分页加载 */
 export class LoadMoreTopicItem extends TreeItemBase {
     constructor(public readonly topicId: number) {
         super("加载更多...", vscode.TreeItemCollapsibleState.None);
@@ -338,6 +402,7 @@ export class LoadMoreTopicItem extends TreeItemBase {
     }
 }
 
+/** 空状态提示项，用于在无内容时显示提示信息 */
 export class TabEmptyItem extends TreeItemBase {
     constructor(msg: string) {
         super(msg, vscode.TreeItemCollapsibleState.None);
@@ -346,6 +411,7 @@ export class TabEmptyItem extends TreeItemBase {
     }
 }
 
+/** 搜索模式下的"加载更多"按钮 */
 export class LoadMoreSearchItem extends TreeItemBase {
     constructor() {
         super("加载更多搜索结果...", vscode.TreeItemCollapsibleState.None);
@@ -355,6 +421,7 @@ export class LoadMoreSearchItem extends TreeItemBase {
     }
 }
 
+/** 推荐流的"加载更多"按钮 */
 export class LoadMoreFeedItem extends TreeItemBase {
     constructor() {
         super("加载更多推荐...", vscode.TreeItemCollapsibleState.None);
@@ -364,6 +431,7 @@ export class LoadMoreFeedItem extends TreeItemBase {
     }
 }
 
+/** 加载中占位项，显示旋转图标表示正在加载 */
 export class BusyItem extends TreeItemBase {
     constructor(msg: string) {
         super(msg, vscode.TreeItemCollapsibleState.None);
