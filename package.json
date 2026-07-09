@@ -55,6 +55,16 @@
           "group": "navigation"
         },
         {
+          "command": "heybox.toggleNotifications",
+          "when": "view == heybox.postList",
+          "group": "navigation"
+        },
+        {
+          "command": "heybox.markAllRead",
+          "when": "view == heybox.postList",
+          "group": "navigation"
+        },
+        {
           "command": "heybox.login",
           "when": "view == heybox.postList",
           "group": "navigation"
@@ -135,6 +145,18 @@
         "command": "heybox.signDaily",
         "title": "每日签到",
         "icon": "$(check)",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.toggleNotifications",
+        "title": "切换消息提醒",
+        "icon": "$(bell)",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.markAllRead",
+        "title": "标记所有消息为已读",
+        "icon": "$(check-all)",
         "category": "HeyBox"
       },
       {

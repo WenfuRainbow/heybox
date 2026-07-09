@@ -2,22 +2,26 @@ import * as vscode from "vscode";
 import { HeyBoxClient } from "./api/client";
 import { PostListProvider, toggleFav, getFavs } from "./providers/postListProvider";
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
-import { SearchItemInfo, PostTreeResult } from "./types";
+import { SearchItemInfo, PostTreeResult, SignTaskItem, MessageItem } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
 let currentPanel: vscode.WebviewPanel | undefined;
 const MAX_HISTORY = 50;
+let pollTimer: ReturnType<typeof setInterval> | undefined;
+let lastSeenIds = new Set<string>();
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     const client = new HeyBoxClient(context);
     await client.loadConfig();
     postListProvider = new PostListProvider(client);
+    postListProvider.setContext(context);
 
     const treeView = vscode.window.createTreeView("heybox.postList", {
         treeDataProvider: postListProvider, showCollapseAll: true,
     });
+    postListProvider.setTreeView(treeView);
     context.subscriptions.push(treeView);
 
     postDetailProvider = new PostDetailViewProvider(context.extensionUri);
@@ -25,6 +29,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     checkCookieAndPrompt(context, client);
     applyStealthMode();
+
+    // 每次打开自动签到
+    client.signDaily().then((r) => {
+        vscode.window.showInformationMessage(`签到: ${r.message}`);
+    }).catch(() => {});
+
+    const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
+    statusBarItem.command = "heybox.toggleNotifications";
+    statusBarItem.tooltip = "小黑盒消息提醒 (点击开启/关闭)";
+    updateStatusBar(statusBarItem, 0, false);
+    context.subscriptions.push(statusBarItem);
 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", async () => { await client.loadConfig(); postListProvider!.refresh(); }));
     context.subscriptions.push(vscode.commands.registerCommand("heybox.searchPost", async () => {
@@ -40,19 +55,69 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFeed", async () => postListProvider!.loadMoreFeed()));
     context.subscriptions.push(vscode.commands.registerCommand("heybox.signDaily", async () => {
         try {
-            const result = await client.signDaily();
-            if (result.success) {
-                vscode.window.showInformationMessage(`签到成功！连续签到 ${result.streak} 天`);
-            } else {
-                vscode.window.showInformationMessage(result.message);
-            }
+            await vscode.window.withProgress(
+                { location: vscode.ProgressLocation.Notification, title: "小黑盒签到", cancellable: false },
+                async (progress) => {
+                    progress.report({ message: "获取任务列表..." });
+                    const taskList = await client.getTaskList();
+                    const nickname = taskList.user?.username || "未知";
+                    const coin = taskList.user?.level_info?.coin || "?";
+                    vscode.window.showInformationMessage(`账号: ${nickname} | 当前H币: ${coin}`);
+
+                    let signTask: SignTaskItem | undefined;
+                    for (const group of taskList.task_list || []) {
+                        for (const task of group.tasks || []) {
+                            if (task.type === "sign") { signTask = task; break; }
+                        }
+                        if (signTask) break;
+                    }
+
+                    if (signTask && signTask.state === "finish") {
+                        const awards = (signTask.award_desc_v2 || [])
+                            .map(a => a.desc).filter(Boolean).join(" ");
+                        vscode.window.showInformationMessage(
+                            `签到已完成${awards ? "，奖励: " + awards : ""}`);
+                        return;
+                    }
+
+                    progress.report({ message: "正在签到..." });
+                    const signResult = await client.signDaily();
+                    vscode.window.showInformationMessage(signResult.message);
+                }
+            );
         } catch (e) {
-            vscode.window.showErrorMessage(`签到失败: ${(e as Error).message}`);
+            const msg = (e as Error).message || "";
+            if (msg.includes("Cookie")) vscode.window.showErrorMessage(msg);
+            else vscode.window.showErrorMessage(`签到失败: ${msg}`);
         }
     }));
 
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.toggleNotifications", async () => {
+        if (pollTimer) {
+            clearInterval(pollTimer);
+            pollTimer = undefined;
+            updateStatusBar(statusBarItem, 0, false);
+            vscode.window.showInformationMessage("小黑盒消息提醒已关闭");
+        } else {
+            startPolling(client, statusBarItem, context);
+            vscode.window.showInformationMessage("小黑盒消息提醒已开启 (每3分钟检查)");
+        }
+    }));
+
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.markAllRead", async () => {
+        lastSeenIds = new Set<string>();
+        context.globalState.update("heybox.seenMsgIds", []);
+        updateStatusBar(statusBarItem, 0, pollTimer !== undefined);
+        vscode.window.showInformationMessage("已标记所有消息为已读");
+    }));
+
+    if (client.getCookie()) {
+        startPolling(client, statusBarItem, context);
+    }
+
     context.subscriptions.push(vscode.commands.registerCommand("heybox.openPost", async (post: SearchItemInfo) => {
         if (!post?.linkid) return;
+        postListProvider!.saveLastPost(post.linkid);
         await openAndShowPost(context, client, String(post.linkid));
     }));
 
@@ -103,6 +168,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await client.setCookie(cookie);
             vscode.window.showInformationMessage("登录成功！");
             postListProvider!.refresh();
+            if (!pollTimer) {
+                startPolling(client, statusBarItem, context);
+            }
         } else {
             vscode.window.showErrorMessage("Cookie 格式无效，需要包含 heybox_id 或 x_xhh_tokenid");
         }
@@ -117,6 +185,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await client.clearCookie();
             vscode.window.showInformationMessage("已退出登录");
             postListProvider!.refresh();
+            if (pollTimer) {
+                clearInterval(pollTimer);
+                pollTimer = undefined;
+                updateStatusBar(statusBarItem, 0, false);
+            }
         }
     }));
 
@@ -259,6 +332,72 @@ async function importCookieFromClipboard(context: vscode.ExtensionContext, clien
     }
 }
 
+function updateStatusBar(item: vscode.StatusBarItem, unread: number, active: boolean) {
+    if (!active) {
+        item.text = "$(bell-slash) 消息";
+        item.tooltip = "小黑盒消息提醒: 已关闭 (点击开启)";
+        item.backgroundColor = undefined;
+    } else if (unread > 0) {
+        item.text = `$(bell) ${unread}`;
+        item.tooltip = `小黑盒: ${unread} 条新消息 (点击查看)`;
+        item.backgroundColor = new vscode.ThemeColor("statusBarItem.warningBackground");
+    } else {
+        item.text = "$(bell) 0";
+        item.tooltip = "小黑盒消息提醒: 无新消息";
+        item.backgroundColor = undefined;
+    }
+    item.show();
+}
+
+function startPolling(client: HeyBoxClient, statusBarItem: vscode.StatusBarItem, context: vscode.ExtensionContext) {
+    lastSeenIds = new Set(context.globalState.get<string[]>("heybox.seenMsgIds", []));
+    checkMessages(client, statusBarItem, context);
+    pollTimer = setInterval(() => checkMessages(client, statusBarItem, context), 3 * 60 * 1000);
+}
+
+async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusBarItem, context: vscode.ExtensionContext) {
+    try {
+        const replies = await client.getMessages(0, 0, 10);
+        const likes = await client.getMessages(1, 0, 10);
+
+        const all = [...(replies.messages || []), ...(likes.messages || [])];
+        const newMsgs = all.filter(m => !lastSeenIds.has(m.message_id));
+
+        if (newMsgs.length > 0) {
+            updateStatusBar(statusBarItem, newMsgs.length, true);
+
+            for (const msg of newMsgs) {
+                const linkId = msg.link?.linkid || msg.link_id || msg.linkid;
+                const user = msg.user_a?.nickname || msg.user_a?.username || "未知用户";
+                const desc = msg.text || msg.comment_a_text || "新消息";
+                const shortDesc = desc.length > 50 ? desc.substring(0, 50) + "..." : desc;
+
+                const action = await vscode.window.showInformationMessage(
+                    `${user}: ${shortDesc}`,
+                    "查看帖子"
+                );
+                if (action === "查看帖子" && linkId) {
+                    await vscode.commands.executeCommand("heybox.openPost", { linkid: Number(linkId) });
+                }
+
+                lastSeenIds.add(msg.message_id);
+            }
+
+            const seenArr = Array.from(lastSeenIds).slice(-200);
+            lastSeenIds = new Set(seenArr);
+            context.globalState.update("heybox.seenMsgIds", seenArr);
+        } else {
+            updateStatusBar(statusBarItem, 0, true);
+        }
+    } catch (e) {
+        const msg = (e as Error).message || "";
+        if (msg.includes("Cookie")) {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
+            updateStatusBar(statusBarItem, 0, false);
+        }
+    }
+}
+
 function isStealthMode(): boolean {
     return vscode.workspace.getConfiguration("heybox").get<boolean>("stealthMode", false);
 }
@@ -269,4 +408,5 @@ function applyStealthMode(): void {
 
 export function deactivate(): void {
     postListProvider?.dispose();
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
 }

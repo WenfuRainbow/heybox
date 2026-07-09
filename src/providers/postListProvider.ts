@@ -5,6 +5,8 @@ import { SearchItemInfo, TopicChild } from "../types";
 type ViewMode = "recommend" | "categories" | "favorites";
 
 const FAV_KEY = "heybox.favorites";
+const EXPANDED_KEY = "heybox.expandedTopics";
+const LAST_POST_KEY = "heybox.lastPostId";
 const MAX_SEARCH_RESULTS = 200; // 搜索结果上限，防止内存无限增长
 
 function getFavs(context?: vscode.ExtensionContext): SearchItemInfo[] {
@@ -58,7 +60,28 @@ export class PostListProvider
 
     private favCache: Map<number, number> = new Map();
 
+    private ctx?: vscode.ExtensionContext;
+    private treeView?: vscode.TreeView<TreeItemBase>;
+    private expandedTopics: Set<number> = new Set();
+
     constructor(private client: HeyBoxClient) {}
+
+    setContext(context: vscode.ExtensionContext): void {
+        this.ctx = context;
+        this.expandedTopics = new Set(context.globalState.get<number[]>(EXPANDED_KEY, []));
+    }
+
+    setTreeView(tv: vscode.TreeView<TreeItemBase>): void {
+        this.treeView = tv;
+    }
+
+    saveExpanded(): void {
+        if (this.ctx) this.ctx.globalState.update(EXPANDED_KEY, [...this.expandedTopics]);
+    }
+
+    saveLastPost(linkid: number): void {
+        if (this.ctx) this.ctx.globalState.update(LAST_POST_KEY, linkid);
+    }
 
     dispose(): void {
         this._onDidChangeTreeData.dispose();
@@ -142,7 +165,9 @@ export class PostListProvider
             } else {
                 if (this.topics.length === 0) await this.fetchTopics();
                 tabs.push(...this.topics.map((t) => new TopicItem(t,
-                    this.topicPosts.has(t.topic_id) ? vscode.TreeItemCollapsibleState.Expanded : vscode.TreeItemCollapsibleState.Collapsed)));
+                    (this.topicPosts.has(t.topic_id) || this.expandedTopics.has(t.topic_id))
+                        ? vscode.TreeItemCollapsibleState.Expanded
+                        : vscode.TreeItemCollapsibleState.Collapsed)));
             }
             return tabs;
         }
@@ -194,6 +219,8 @@ export class PostListProvider
     private async fetchTopicPosts(topicId: number): Promise<void> {
         if (this.loadingTopicsSet.has(topicId)) return;
         this.loadingTopicsSet.add(topicId);
+        this.expandedTopics.add(topicId);
+        this.saveExpanded();
         try {
             const offset = this.topicOffsets.get(topicId) || 0;
             const result = await this.client.getTopicFeeds(topicId, offset, 30);

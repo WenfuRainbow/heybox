@@ -3,6 +3,7 @@ import * as https from "https";
 import { generateSignature, Signature } from "./signature";
 import {
     ApiResponse, PostTreeResult, SearchResult, TopicCategoryResult, SearchItemInfo,
+    SignTaskListResult, MessageListResult,
 } from "../types";
 
 const API_BASE = "https://api.xiaoheihe.cn";
@@ -166,16 +167,38 @@ export class HeyBoxClient {
         await this.post("/bbs/app/link/favour", { link_id: linkId }, { link_id: linkId });
     }
 
-    async signDaily(): Promise<{ success: boolean; streak: number; message: string }> {
-        const res = await this.getRaw("/task/sign/");
-        if (res.status === "ok") {
-            const r = res.result as { sign_in_streak?: number };
-            return { success: true, streak: r.sign_in_streak || 0, message: "签到成功" };
+    async signDaily(): Promise<{ ok: boolean; message: string; state?: string }> {
+        const signResp = await this.getRaw("/task/sign_v3/sign");
+        const firstState = (signResp.result as any)?.state as string | undefined;
+        if (firstState === "ignore") return { ok: true, message: "今日已签到", state: "ignore" };
+
+        await new Promise(r => setTimeout(r, 800));
+
+        const stateResp = await this.getRaw("/task/sign_v3/get_sign_state");
+        const result = (stateResp.result || {}) as Record<string, any>;
+        const state = typeof result.state === "string" ? result.state : "";
+
+        if ((stateResp.status === "ok" && state === "ok") || state === "ignore") {
+            const parts: string[] = [];
+            if (result.sign_in_coin) parts.push(`+${result.sign_in_coin}H币`);
+            if (result.sign_in_exp) parts.push(`+${result.sign_in_exp}经验`);
+            if (result.sign_in_streak) parts.push(`连签${result.sign_in_streak}天`);
+            return { ok: true, message: parts.length ? parts.join(" ") : "签到完成", state };
         }
-        if (res.status === "login") {
-            return { success: false, streak: 0, message: "今日已签到" };
-        }
-        throw new Error(res.msg || "签到失败");
+        return { ok: false, message: (typeof stateResp.msg === "string" ? stateResp.msg : "") || state || "签到失败" };
+    }
+
+    async getTaskList(): Promise<SignTaskListResult> {
+        return this.get<SignTaskListResult>("/task/list_v2/");
+    }
+
+    async getMessages(listType: number = 0, offset: number = 0, limit: number = 20): Promise<MessageListResult> {
+        return this.get<MessageListResult>("/bbs/app/user/message", {
+            list_type: String(listType),
+            offset: String(offset),
+            limit: String(limit),
+            no_more: "false",
+        });
     }
 
     /**
