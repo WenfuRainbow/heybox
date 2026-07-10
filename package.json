@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "kyo",
   "engines": {
     "vscode": "^1.85.0"

@@ -308,47 +308,43 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             const seenIds = new Set<string>();
             allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
 
-            // 当评论为空但帖子有评论时，尝试不同 sort_filter 获取评论
-            let foldedTips = "";
+            // 始终捕获折叠提示
+            let foldedTips = (tree as any)?.folded_comment_tips || "";
+
+            // 重试不同 sort_filter，选评论数最多的结果
+            let bestSort = "";
             if (allCommentGroups.length === 0 && totalCommentNum > 0) {
-                for (const sort of ["time_aes", "time_desc", "hot"]) {
+                for (const sort of ["hot", "time_desc", "time_aes"]) {
                     try {
                         const retry = await client.getPostTree(linkId, 0, 0, sort);
                         if (retry?.comments && retry.comments.length > allCommentGroups.length) {
                             allCommentGroups = retry.comments;
-                            retry.comments.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
-                            break;
+                            bestSort = sort;
+                            allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
                         }
-                        foldedTips = (retry as any)?.folded_comment_tips || "";
+                        const ft = (retry as any)?.folded_comment_tips;
+                        if (ft) foldedTips = ft;
                     } catch { /* ignore */ }
                 }
             }
 
-            // 评论数超过已加载数量时，分页加载额外评论（最多显示 30 条）
+            // 串行分页加载额外评论，使用相同 sort_filter 保持排序一致
             const commentLimit = 30;
-            const pageSize = 10; // API 每页返回的评论数
             if (totalCommentNum > allCommentGroups.length && allCommentGroups.length < commentLimit) {
-                const tasks: Promise<void>[] = [];
-                // 根据已加载数量和总数量动态计算需要加载的偏移量
-                const offsets: number[] = [];
                 let nextOffset = allCommentGroups.length;
                 while (nextOffset < Math.min(totalCommentNum, commentLimit)) {
-                    offsets.push(nextOffset);
-                    nextOffset += pageSize;
-                }
-                for (const o of offsets) {
-                    tasks.push(client.getPostTree(linkId, o, 10).then(r => {
-                        if (r?.comments) {
-                            for (const g of r.comments) {
-                                if (g.comment?.[0] && !seenIds.has(g.comment[0].commentid)) {
-                                    seenIds.add(g.comment[0].commentid);
-                                    allCommentGroups.push(g);
-                                }
+                    try {
+                        const r = await client.getPostTree(linkId, nextOffset, 10, bestSort || undefined);
+                        if (!r?.comments || r.comments.length === 0) break;
+                        for (const g of r.comments) {
+                            if (g.comment?.[0] && !seenIds.has(g.comment[0].commentid)) {
+                                seenIds.add(g.comment[0].commentid);
+                                allCommentGroups.push(g);
                             }
                         }
-                    }).catch(() => {}));
+                        nextOffset += r.comments.length;
+                    } catch { break; }
                 }
-                await Promise.all(tasks);
             }
 
             // 组装完整帖子树，根据设置选择在侧边栏或面板中展示
