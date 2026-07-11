@@ -8,7 +8,7 @@ import * as https from "https";
 import { generateSignature, Signature } from "./signature";
 import {
     ApiResponse, PostTreeResult, SearchResult, TopicCategoryResult, SearchItemInfo,
-    SignTaskListResult, MessageListResult,
+    MessageListResult,
 } from "../types";
 
 const API_BASE = "https://api.xiaoheihe.cn";
@@ -180,7 +180,7 @@ export class HeyBoxClient {
      */
     async getPostTree(linkId: string, offset: number = 0, limit: number = 0, sortFilter?: string): Promise<PostTreeResult> {
         const p: Record<string, string> = { link_id: linkId, offset: String(offset) };
-        if (limit > 0) p.limit = String(limit);
+        p.limit = limit > 0 ? String(limit) : "100";
         if (sortFilter) p.sort_filter = sortFilter;
         return this.get<PostTreeResult>("/bbs/app/link/tree", p);
     }
@@ -263,40 +263,6 @@ export class HeyBoxClient {
      */
     async favouritePost(linkId: string): Promise<void> {
         await this.post("/bbs/app/link/favour", { link_id: linkId }, { link_id: linkId });
-    }
-
-    /**
-     * 执行每日签到
-     * 先尝试签到，然后检查签到状态并返回结果
-     * @returns 签到结果，包含成功状态、消息和连续签到天数
-     */
-    async signDaily(): Promise<{ ok: boolean; message: string; state?: string }> {
-        const signResp = await this.getRaw("/task/sign_v3/sign");
-        const firstState = (signResp.result as any)?.state as string | undefined;
-        if (firstState === "ignore") return { ok: true, message: "今日已签到", state: "ignore" };
-
-        await new Promise(r => setTimeout(r, 800));
-
-        const stateResp = await this.getRaw("/task/sign_v3/get_sign_state");
-        const result = (stateResp.result || {}) as Record<string, any>;
-        const state = typeof result.state === "string" ? result.state : "";
-
-        if ((stateResp.status === "ok" && state === "ok") || state === "ignore") {
-            const parts: string[] = [];
-            if (result.sign_in_coin) parts.push(`+${result.sign_in_coin}H币`);
-            if (result.sign_in_exp) parts.push(`+${result.sign_in_exp}经验`);
-            if (result.sign_in_streak) parts.push(`连签${result.sign_in_streak}天`);
-            return { ok: true, message: parts.length ? parts.join(" ") : "签到完成", state };
-        }
-        return { ok: false, message: (typeof stateResp.msg === "string" ? stateResp.msg : "") || state || "签到失败" };
-    }
-
-    /**
-     * 获取任务列表
-     * @returns 任务列表数据
-     */
-    async getTaskList(): Promise<SignTaskListResult> {
-        return this.get<SignTaskListResult>("/task/list_v2/");
     }
 
     /**

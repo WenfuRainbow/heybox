@@ -4,7 +4,7 @@
  * 提供以下功能：
  * - 帖子列表浏览与搜索
  * - 帖子详情查看（侧边栏 / 面板）
- * - 每日签到
+ * - 消息通知
  * - 消息轮询提醒
  * - 收藏管理
  * - Cookie 登录管理
@@ -14,7 +14,7 @@ import * as vscode from "vscode";
 import { HeyBoxClient } from "./api/client";
 import { PostListProvider, toggleFav, getFavs } from "./providers/postListProvider";
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
-import { SearchItemInfo, PostTreeResult, SignTaskItem } from "./types";
+import { SearchItemInfo, PostTreeResult } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
@@ -55,11 +55,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // 应用隐身模式设置
     applyStealthMode();
 
-    // 每次打开自动签到
-    client.signDaily().then((r) => {
-        vscode.window.showInformationMessage(`签到: ${r.message}`);
-    }).catch(() => {});
-
     // 状态栏消息提醒按钮
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
     statusBarItem.command = "heybox.toggleNotifications";
@@ -98,49 +93,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 加载更多 Feed
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFeed", async () => postListProvider!.loadMoreFeed()));
-
-    // 签到命令 — 获取任务列表、检查签到状态、执行签到
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.signDaily", async () => {
-        try {
-            await vscode.window.withProgress(
-                { location: vscode.ProgressLocation.Notification, title: "小黑盒签到", cancellable: false },
-                async (progress) => {
-                    progress.report({ message: "获取任务列表..." });
-                    const taskList = await client.getTaskList();
-                    const nickname = taskList.user?.username || "未知";
-                    const coin = taskList.user?.level_info?.coin || "?";
-                    vscode.window.showInformationMessage(`账号: ${nickname} | 当前H币: ${coin}`);
-
-                    // 在任务列表中查找签到任务
-                    let signTask: SignTaskItem | undefined;
-                    for (const group of taskList.task_list || []) {
-                        for (const task of group.tasks || []) {
-                            if (task.type === "sign") { signTask = task; break; }
-                        }
-                        if (signTask) break;
-                    }
-
-                    // 签到任务已完成，直接提示奖励
-                    if (signTask && signTask.state === "finish") {
-                        const awards = (signTask.award_desc_v2 || [])
-                            .map(a => a.desc).filter(Boolean).join(" ");
-                        vscode.window.showInformationMessage(
-                            `签到已完成${awards ? "，奖励: " + awards : ""}`);
-                        return;
-                    }
-
-                    // 执行签到
-                    progress.report({ message: "正在签到..." });
-                    const signResult = await client.signDaily();
-                    vscode.window.showInformationMessage(signResult.message);
-                }
-            );
-        } catch (e) {
-            const msg = (e as Error).message || "";
-            if (msg.includes("Cookie")) vscode.window.showErrorMessage(msg);
-            else vscode.window.showErrorMessage(`签到失败: ${msg}`);
-        }
-    }));
 
     // 开启/关闭消息提醒 — 切换轮询状态
     context.subscriptions.push(vscode.commands.registerCommand("heybox.toggleNotifications", async () => {
@@ -308,52 +260,55 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             const seenIds = new Set<string>();
             allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
 
-            // 始终捕获折叠提示
             let foldedTips = (tree as any)?.folded_comment_tips || "";
 
-            // 重试不同 sort_filter，选评论数最多的结果
+            // 尝试不同 sort_filter，选评论数最多的结果
             let bestSort = "";
-            if (allCommentGroups.length === 0 && totalCommentNum > 0) {
-                for (const sort of ["hot", "time_desc", "time_aes"]) {
-                    try {
-                        const retry = await client.getPostTree(linkId, 0, 0, sort);
-                        if (retry?.comments && retry.comments.length > allCommentGroups.length) {
-                            allCommentGroups = retry.comments;
-                            bestSort = sort;
-                            allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
-                        }
-                        const ft = (retry as any)?.folded_comment_tips;
-                        if (ft) foldedTips = ft;
-                    } catch { /* ignore */ }
-                }
+            for (const sort of ["", "hot", "time_desc", "time_aes"]) {
+                try {
+                    const retry = await client.getPostTree(linkId, 0, 200, sort || undefined);
+                    if (retry?.comments && retry.comments.length > allCommentGroups.length) {
+                        allCommentGroups = retry.comments;
+                        bestSort = sort;
+                        allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
+                    }
+                    const ft = (retry as any)?.folded_comment_tips;
+                    if (ft) foldedTips = ft;
+                } catch { /* ignore */ }
             }
 
-            // 串行分页加载额外评论，使用相同 sort_filter 保持排序一致
-            const commentLimit = 30;
-            if (totalCommentNum > allCommentGroups.length && allCommentGroups.length < commentLimit) {
+            // 串行分页加载全部评论，连续 3 次无新增则停止
+            let stoppedByEmpty = false;
+            if (totalCommentNum > allCommentGroups.length) {
                 let nextOffset = allCommentGroups.length;
-                while (nextOffset < Math.min(totalCommentNum, commentLimit)) {
+                let emptyCount = 0;
+                while (nextOffset < totalCommentNum && emptyCount < 3) {
                     try {
-                        const r = await client.getPostTree(linkId, nextOffset, 10, bestSort || undefined);
-                        if (!r?.comments || r.comments.length === 0) break;
+                        const r = await client.getPostTree(linkId, nextOffset, 100, bestSort || undefined);
+                        if (!r?.comments || r.comments.length === 0) { emptyCount++; continue; }
+                        let added = 0;
                         for (const g of r.comments) {
                             if (g.comment?.[0] && !seenIds.has(g.comment[0].commentid)) {
                                 seenIds.add(g.comment[0].commentid);
                                 allCommentGroups.push(g);
+                                added++;
                             }
                         }
+                        if (added === 0) { emptyCount++; } else { emptyCount = 0; }
                         nextOffset += r.comments.length;
                     } catch { break; }
                 }
+                stoppedByEmpty = emptyCount >= 3;
             }
 
             // 组装完整帖子树，根据设置选择在侧边栏或面板中展示
             const fullTree: PostTreeResult = { ...tree, comments: allCommentGroups };
             const location = vscode.workspace.getConfiguration("heybox").get<string>("postDetailLocation", "sidebar");
             const stealth = isStealthMode();
-            const commentNote = totalCommentNum > allCommentGroups.length
-                ? `共 ${totalCommentNum} 条评论，当前显示前 ${allCommentGroups.length} 条`
-                : undefined;
+            const loadedCount = allCommentGroups.reduce((sum, g) => sum + (g.comment?.length || 0), 0);
+            const commentNote = (stoppedByEmpty || loadedCount >= totalCommentNum)
+                ? undefined
+                : `共 ${totalCommentNum} 条评论，当前显示 ${loadedCount} 条`;
 
             if (location === "sidebar" && postDetailProvider) {
                 postDetailProvider.showPost(fullTree, commentNote, foldedTips);

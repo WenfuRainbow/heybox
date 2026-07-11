@@ -172,41 +172,6 @@ export interface TopicCategoryResult {
     latest_hot_topics: { name: string; children: TopicChild[] };
 }
 
-/** 签到任务奖励描述 */
-export interface SignTaskAward {
-    desc: string;
-    icon: string;
-}
-
-/** 签到任务的上报附加信息 */
-export interface SignTaskReportExtra {
-    task_id: string;
-    task_type: string;
-}
-
-/** 单个签到任务 */
-export interface SignTaskItem {
-    title: string;
-    /** 任务状态（如完成/未完成） */
-    state: string;
-    state_desc: string;
-    type: string;
-    report_extra?: SignTaskReportExtra;
-    award_desc_v2?: SignTaskAward[];
-}
-
-/** 签到任务分组（如每日任务、成就任务） */
-export interface SignTaskGroup {
-    title: string;
-    tasks: SignTaskItem[];
-}
-
-/** 签到任务列表接口返回值 */
-export interface SignTaskListResult {
-    user: { username: string; level_info: { coin: string } };
-    task_list: SignTaskGroup[];
-}
-
 /** 消息通知中的用户信息 */
 export interface MessageUser {
     heybox_id: string;
