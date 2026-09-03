@@ -140,8 +140,8 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .ct{font-size:13px;margin:4px 0;white-space:pre-wrap;word-break:break-word}
     .cmeta{font-size:11px;color:var(--dim);display:flex;gap:8px}
     .ftr{text-align:center;font-size:12px;color:var(--dim);padding:16px 0 8px}
-    .img-preview{position:fixed;z-index:9999;pointer-events:none;width:auto;height:auto;border:2px solid var(--border);border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,.4);display:none;background:var(--bg)}
-    .img-preview img{width:auto;height:auto;max-width:90vw;max-height:90vh;display:block;border-radius:4px}
+    .img-preview{position:fixed;z-index:9999;pointer-events:none;overflow:hidden;border:2px solid var(--border);border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,.4);display:none;background:var(--bg)}
+    .img-preview img{display:block;border-radius:4px}
 </style></head>
 <body>
     <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span></div>
@@ -165,9 +165,23 @@ var v=localStorage.getItem('hb_img');if(v){s.value=v;r.style.setProperty('--scal
 s.addEventListener('input',function(){var v=this.value;r.style.setProperty('--scale',v/100);l.textContent=v+'%';localStorage.setItem('hb_img',v)});
 
 var pv=document.createElement('div');pv.className='img-preview';var pi=document.createElement('img');pv.appendChild(pi);document.body.appendChild(pv);
-document.addEventListener('mouseover',function(e){var t=e.target;if(t.tagName==='IMG'&&t.closest('.body img,.cimg')){pi.src=t.src;pv.style.display='block';var x=e.clientX+20,y=e.clientY;if(x+400>innerWidth)x=e.clientX-420;if(y+300>innerHeight)y=innerHeight-320;if(y<0)y=0;pv.style.left=x+'px';pv.style.top=y+'px'}});
+
+function showPreview(cx, cy){
+  var maxW = innerWidth - cx - 20;
+  var maxH = innerHeight - 20;
+  pi.style.maxWidth = maxW + 'px';
+  pi.style.maxHeight = maxH + 'px';
+  pv.style.display = 'block';
+  var x = cx + 20;
+  var y = Math.min(cy, innerHeight - pv.offsetHeight - 10);
+  if(y < 0) y = 0;
+  pv.style.left = x + 'px';
+  pv.style.top = y + 'px';
+}
+
+document.addEventListener('mouseover',function(e){var t=e.target;if(t.tagName==='IMG'&&t.closest('.body img,.cimg')){pi.src=t.src;showPreview(e.clientX, e.clientY)}});
 document.addEventListener('mouseout',function(e){if(e.target.tagName==='IMG'&&e.target.closest('.body img,.cimg'))pv.style.display='none'});
-document.addEventListener('mousemove',function(e){if(pv.style.display==='block'){var x=e.clientX+20,y=e.clientY;if(x+400>innerWidth)x=e.clientX-420;if(y+300>innerHeight)y=innerHeight-320;if(y<0)y=0;pv.style.left=x+'px';pv.style.top=y+'px'}});
+document.addEventListener('mousemove',function(e){if(pv.style.display==='block')showPreview(e.clientX, e.clientY)});
 })();
 </script>
 </body></html>`;

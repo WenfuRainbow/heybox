@@ -3,6 +3,7 @@
 .vscode/**
 src/**
 node_modules/**
+!node_modules/playwright-core/**
 test**
 *.ts
 **/*.map

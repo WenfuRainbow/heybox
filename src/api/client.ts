@@ -185,6 +185,21 @@ export class HeyBoxClient {
         return this.get<PostTreeResult>("/bbs/app/link/tree", p);
     }
 
+    /** 获取某条主评论下的子评论（回复），支持使用上一页最后一条评论 ID 分页。 */
+    async getSubComments(rootCommentId: string, lastval: string = ""): Promise<{ comments: import("../types").Comment[]; lastval: string }> {
+        const result = await this.get<any>("/bbs/app/comment/sub/comments", {
+            root_comment_id: rootCommentId,
+            lastval,
+        });
+        const comments = Array.isArray(result?.comments)
+            ? result.comments
+            : Array.isArray(result?.comment) ? result.comment : [];
+        return {
+            comments,
+            lastval: String(result?.lastval ?? comments.at(-1)?.commentid ?? ""),
+        };
+    }
+
     /**
      * 搜索帖子
      * @param query 搜索关键词
@@ -282,6 +297,105 @@ export class HeyBoxClient {
     }
 
     /**
+     * 服务端探活：检查给定 cookie 是否被服务器认可为有效登录态
+     * 供浏览器登录轮询使用。判别依据（实测）：
+     * - 匿名访客也会被种下 x_xhh_tokenid（设备令牌），故 cookie 含它不代表已登录；
+     * - 消息接口对"无 heybox_id cookie + heybox_id 参数为空"的匿名会话返回 status ok，
+     *   但 heybox_id 参数非空时匿名会话返回 relogin —— 因此探活必须把
+     *   cookie 中解析出的 heybox_id 同时换入公共参数，服务端校验不一致即拒绝。
+     *
+     * 实现期间临时换入 cookie 与 heyboxId，窗口内并发的其他 API 调用会带上候选值
+     * （实际场景：登录等待期间轮询已停止、用户几乎无其他操作，风险可忽略）。
+     *
+     * @param cookie 待验证的 cookie 字符串
+     * @returns true 服务端认可；false 非登录态或网络异常（调用方一律继续等待）
+     */
+    async verifyCookie(cookie: string): Promise<boolean> {
+        const m = cookie.match(/heybox_id=(\d+)/);
+        if (!m) return false; // 无用户 id 的 cookie 必然不是登录态
+
+        const savedCookie = this.cookie;
+        const savedHeyboxId = this.heyboxId;
+        this.cookie = cookie;
+        this.heyboxId = m[1];
+        try {
+            const res = await this.getRaw("/bbs/app/user/message", {
+                list_type: "0", offset: "0", limit: "1", no_more: "false",
+            });
+            return res.status === "ok";
+        } catch {
+            return false;
+        } finally {
+            this.cookie = savedCookie;
+            this.heyboxId = savedHeyboxId;
+        }
+    }
+
+    /**
+     * 从推荐流取一条帖子 ID，供浏览器登录流程在真实浏览器中"打开帖子页面"使用。
+     * feeds 属于轻量接口：即使会话被风控拦截 link/tree，feed 仍能正常返回。
+     *
+     * 与 verifyCookie 相同，实现期间临时换入 cookie 与 heyboxId。
+     *
+     * @param cookie 候选 cookie 字符串
+     * @returns 帖子 ID；无可用帖子或网络异常时返回 null
+     */
+    async probeLinkId(cookie: string): Promise<number | null> {
+        const m = cookie.match(/heybox_id=(\d+)/);
+        if (!m) return null; // 无用户 id 的 cookie 必然不是登录态
+
+        const savedCookie = this.cookie;
+        const savedHeyboxId = this.heyboxId;
+        this.cookie = cookie;
+        this.heyboxId = m[1];
+        try {
+            const feed = await this.getFeed(0, "0");
+            const target = (feed.links || []).find((p) => p && p.linkid);
+            return target ? target.linkid : null;
+        } catch {
+            return null;
+        } finally {
+            this.cookie = savedCookie;
+            this.heyboxId = savedHeyboxId;
+        }
+    }
+
+    /**
+     * 帖子详情探活：检查给定 cookie 能否正常打开帖子详情（link/tree 不被风控拦截）
+     * 供浏览器登录轮询使用。实测发现：登录页抓取的 cookie 与"真实浏览会话"存在差异，
+     * 服务端会对 link/tree 等深层接口要求人机验证（返回 show_captcha），
+     * 而 message/feeds 等轻量接口不受影响——因此登录成功必须以本探活通过为准。
+     *
+     * @param cookie 待验证的 cookie 字符串
+     * @param linkId 可选的帖子 ID（来自 probeLinkId）；省略时内部自取推荐流第一条
+     * @returns true 可正常打开帖子详情；false 被风控拦截或网络异常（调用方继续等待）
+     */
+    async canOpenPost(cookie: string, linkId?: number): Promise<boolean> {
+        const m = cookie.match(/heybox_id=(\d+)/);
+        if (!m) return false; // 无用户 id 的 cookie 必然不是登录态
+
+        const savedCookie = this.cookie;
+        const savedHeyboxId = this.heyboxId;
+        this.cookie = cookie;
+        this.heyboxId = m[1];
+        try {
+            if (!linkId) {
+                const feed = await this.getFeed(0, "0");
+                const target = (feed.links || []).find((p) => p && p.linkid);
+                if (!target) return true; // 推荐流为空：退化为登录态校验（message 探活已通过）
+                linkId = target.linkid;
+            }
+            await this.getPostTree(String(linkId), 0, 1);
+            return true;
+        } catch {
+            return false;
+        } finally {
+            this.cookie = savedCookie;
+            this.heyboxId = savedHeyboxId;
+        }
+    }
+
+    /**
      * 设置并保存 Cookie（仅存储到 SecretStorage，不写入明文 settings）
      * 同时从 cookie 中提取 heybox_id 并更新配置
      * @param cookie 要保存的 cookie 字符串
@@ -346,3 +460,4 @@ export class HeyBoxClient {
         return this.context;
     }
 }
+

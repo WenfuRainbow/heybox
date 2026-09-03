@@ -16,6 +16,7 @@ import { PostListProvider, toggleFav, getFavs } from "./providers/postListProvid
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
 import { SearchItemInfo, PostTreeResult } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
+import { loginWithBrowser, cancelActiveBrowserLogin } from "./auth/browserLogin";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
@@ -50,8 +51,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     postDetailProvider = new PostDetailViewProvider(context.extensionUri);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
-    // 检查 Cookie 是否已配置，未配置则弹窗提示
-    checkCookieAndPrompt(context, client);
     // 应用隐身模式设置
     applyStealthMode();
 
@@ -61,6 +60,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     statusBarItem.tooltip = "小黑盒消息提醒 (点击开启/关闭)";
     updateStatusBar(statusBarItem, 0, false);
     context.subscriptions.push(statusBarItem);
+
+    // 检查 Cookie 是否已配置，未配置则弹窗提示
+    checkCookieAndPrompt(context, client, statusBarItem);
 
     // ─── 命令注册 ───
 
@@ -166,25 +168,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
     }));
 
-    // 登录命令 — 手动输入 Cookie
+    // 登录命令 — 选择浏览器半自动登录或手动粘贴 Cookie
     context.subscriptions.push(vscode.commands.registerCommand("heybox.login", async () => {
-        const cookie = await vscode.window.showInputBox({
-            prompt: "请输入小黑盒 Cookie",
-            placeHolder: "从浏览器开发者工具复制的 Cookie",
-            password: true,
-            ignoreFocusOut: true
-        });
-        if (!cookie) return;
-        if (client.validateCookie(cookie)) {
-            await client.setCookie(cookie);
-            vscode.window.showInformationMessage("登录成功！");
-            postListProvider!.refresh();
-            // 登录成功后自动开启消息轮询
-            if (!pollTimer) {
-                startPolling(client, statusBarItem, context);
-            }
+        const picked = await vscode.window.showQuickPick([
+            { label: "浏览器登录（推荐）", detail: "打开小黑盒登录页，手动登录后自动获取 Cookie" },
+            { label: "手动粘贴 Cookie", detail: "粘贴从浏览器开发者工具复制的 Cookie 字符串" }
+        ], { placeHolder: "选择登录方式" });
+        if (!picked) return;
+        if (picked.label.startsWith("浏览器登录")) {
+            await handleBrowserLogin(client, context, statusBarItem);
         } else {
-            vscode.window.showErrorMessage("Cookie 格式无效，需要包含 heybox_id 或 x_xhh_tokenid");
+            await loginByPaste(client, context, statusBarItem);
         }
     }));
 
@@ -301,6 +295,36 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
                 stoppedByEmpty = emptyCount >= 3;
             }
 
+            // link/tree 默认只带每组前两条回复；继续调用网页端使用的子评论接口，
+            // 按 lastval 分页，确保“全部 N 条回复”不会被截断。
+            for (const group of allCommentGroups) {
+                if (!group.comment || group.comment.length === 0) continue;
+                const root = group.comment[0];
+                const existing = new Set(group.comment.map(c => c.commentid));
+                let lastval = group.comment.at(-1)?.commentid || "";
+                let emptyCount = 0;
+                while (emptyCount < 2) {
+                    try {
+                        const page = await client.getSubComments(root.commentid, lastval);
+                        if (!page.comments.length) break;
+                        let added = 0;
+                        for (const comment of page.comments) {
+                            if (!existing.has(comment.commentid)) {
+                                existing.add(comment.commentid);
+                                group.comment.push(comment);
+                                added++;
+                            }
+                        }
+                        const next = page.lastval;
+                        if (!added || !next || next === lastval) break;
+                        lastval = next;
+                        emptyCount = 0;
+                    } catch {
+                        break;
+                    }
+                }
+            }
+
             // 组装完整帖子树，根据设置选择在侧边栏或面板中展示
             const fullTree: PostTreeResult = { ...tree, comments: allCommentGroups };
             const location = vscode.workspace.getConfiguration("heybox").get<string>("postDetailLocation", "sidebar");
@@ -327,6 +351,7 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
         const msg = (e as Error).message || "";
         if (msg.includes("超时")) vscode.window.showErrorMessage("请求超时，请检查网络连接");
         else if (msg.includes("Cookie")) vscode.window.showErrorMessage(msg);
+        else if (msg.includes("show_captcha")) vscode.window.showErrorMessage("帖子详情被服务端风控拦截（需人机验证）。请稍后重试；若持续出现，请重新登录并在弹出的浏览器中完成人机验证后再操作");
         else vscode.window.showErrorMessage(`获取帖子详情失败: ${msg}`);
     }
 }
@@ -334,19 +359,60 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
 /**
  * 检查 Cookie 是否已配置，未配置时弹窗提供快捷操作
  */
-function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxClient): void {
+function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxClient, statusBarItem?: vscode.StatusBarItem): void {
     let cookie = client.getCookie();
 
     if (!cookie) {
         vscode.window.showWarningMessage(
             "HeyBox 插件需要配置 Cookie 才能使用。",
-            "从剪贴板导入", "打开设置", "查看教程"
+            "浏览器登录", "从剪贴板导入", "打开设置", "查看教程"
         ).then(c => {
             if (c === "打开设置") vscode.commands.executeCommand("workbench.action.openSettings", "heybox.cookie");
             if (c === "查看教程") vscode.commands.executeCommand("workbench.action.openWalkthrough", "heybox.heybox-forum.heybox.walkthrough");
             if (c === "从剪贴板导入") importCookieFromClipboard(context, client);
+            if (c === "浏览器登录") void handleBrowserLogin(client, context, statusBarItem);
         });
     }
+}
+
+/**
+ * 登录成功后的统一处理 — 提示并刷新列表，启动消息轮询
+ */
+function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem): void {
+    vscode.window.showInformationMessage("登录成功！");
+    postListProvider?.refresh();
+    if (!pollTimer && statusBarItem) {
+        startPolling(client, statusBarItem, context);
+    }
+}
+
+/**
+ * 手动粘贴 Cookie 登录（原登录方式，保留为浏览器登录的备选）
+ */
+async function loginByPaste(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem): Promise<void> {
+    const cookie = await vscode.window.showInputBox({
+        prompt: "请输入小黑盒 Cookie",
+        placeHolder: "从浏览器开发者工具复制的 Cookie",
+        password: true,
+        ignoreFocusOut: true
+    });
+    if (!cookie) return;
+    if (client.validateCookie(cookie)) {
+        await client.setCookie(cookie);
+        onLoginSuccess(client, context, statusBarItem);
+    } else {
+        vscode.window.showErrorMessage("Cookie 格式无效，需要包含 heybox_id 或 x_xhh_tokenid");
+    }
+}
+
+/**
+ * 浏览器半自动登录入口 — 打开真实登录页，用户手动登录后自动抓取 Cookie
+ */
+async function handleBrowserLogin(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem): Promise<void> {
+    const result = await loginWithBrowser(client);
+    if (result === "success") onLoginSuccess(client, context, statusBarItem);
+    else if (result === "timeout") vscode.window.showWarningMessage("浏览器登录超时（5 分钟），可重试或手动粘贴 Cookie");
+    else if (result === "cancelled") vscode.window.showInformationMessage("已取消浏览器登录");
 }
 
 /**
@@ -469,6 +535,8 @@ function applyStealthMode(): void {
  * 扩展停用时清理资源 — 销毁视图、停止消息轮询
  */
 export function deactivate(): void {
+    cancelActiveBrowserLogin();
     postListProvider?.dispose();
     if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
 }
+
