@@ -84,6 +84,8 @@ export interface CommentImage {
 export interface Comment {
     commentid: string;
     text: string;
+    /** 首层评论的子回复总数（/bbs/app/link/tree 返回） */
+    child_num?: number;
     up: number;
     down: number;
     /** 楼层号 */
@@ -132,6 +134,8 @@ export interface SearchItemInfo {
     link_tag: number;
     is_web: number;
     comment_num: number;
+    /** 列表接口返回的收藏数（部分接口可能不提供） */
+    favour_count?: number;
     create_at: number;
     modify_at: number;
     share_url: string;

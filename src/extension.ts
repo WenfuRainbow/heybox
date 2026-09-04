@@ -20,6 +20,8 @@ import { postHtml } from "./utils/htmlRenderer";
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
 let currentPanel: vscode.WebviewPanel | undefined;
+let currentPanelPost: PostTreeResult | undefined;
+let currentPanelFoldedTips = "";
 /** 浏览历史最大条数 */
 const MAX_HISTORY = 50;
 /** 消息轮询定时器 */
@@ -47,11 +49,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(treeView);
 
     // 注册帖子详情 Webview 视图
-    postDetailProvider = new PostDetailViewProvider(context.extensionUri);
+    postDetailProvider = new PostDetailViewProvider(context.extensionUri, (id, rootId) => {
+        if (rootId) {
+            const post = postDetailProvider?.getCurrentPost();
+            if (post) {
+                void loadRepliesForPost(client, post, id, rootId, (updated, note) => {
+                    postDetailProvider?.showPost(updated, note, postDetailProvider.getFoldedTips());
+                });
+            }
+        }
+    });
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
-    // 检查 Cookie 是否已配置，未配置则弹窗提示
-    checkCookieAndPrompt(context, client);
     // 应用隐身模式设置
     applyStealthMode();
 
@@ -61,6 +70,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     statusBarItem.tooltip = "小黑盒消息提醒 (点击开启/关闭)";
     updateStatusBar(statusBarItem, 0, false);
     context.subscriptions.push(statusBarItem);
+
+    // 检查 Cookie 是否已配置，未配置则弹窗提示
+    checkCookieAndPrompt(context, client, statusBarItem);
 
     // ─── 命令注册 ───
 
@@ -166,26 +178,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
     }));
 
-    // 登录命令 — 手动输入 Cookie
+    // 登录命令 — 手动粘贴 Cookie
     context.subscriptions.push(vscode.commands.registerCommand("heybox.login", async () => {
-        const cookie = await vscode.window.showInputBox({
-            prompt: "请输入小黑盒 Cookie",
-            placeHolder: "从浏览器开发者工具复制的 Cookie",
-            password: true,
-            ignoreFocusOut: true
-        });
-        if (!cookie) return;
-        if (client.validateCookie(cookie)) {
-            await client.setCookie(cookie);
-            vscode.window.showInformationMessage("登录成功！");
-            postListProvider!.refresh();
-            // 登录成功后自动开启消息轮询
-            if (!pollTimer) {
-                startPolling(client, statusBarItem, context);
-            }
-        } else {
-            vscode.window.showErrorMessage("Cookie 格式无效，需要包含 heybox_id 或 x_xhh_tokenid");
-        }
+        await loginByPaste(client, context, statusBarItem);
     }));
 
     // 退出登录 — 清除 Cookie 并停止轮询
@@ -241,10 +236,49 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
  * @param client  - API 客户端
  * @param linkId  - 帖子 ID
  */
-async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxClient, linkId: string): Promise<void> {
+/** 仅为当前评论组追加子回复，避免重新请求整帖后覆盖已加载的数据。 */
+async function loadRepliesForPost(
+    client: HeyBoxClient,
+    post: PostTreeResult,
+    linkId: string,
+    rootId: string,
+    render: (post: PostTreeResult, note?: string) => void,
+): Promise<void> {
+    if (!post || String(post.link.linkid) !== linkId) return;
+    const group = post.comments?.find(g => String(g.comment?.[0]?.commentid) === rootId);
+    if (!group?.comment?.[0]) return;
+
+    try {
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "加载回复中...", cancellable: false }, async () => {
+            const known = new Set(group.comment.map(c => String(c.commentid)));
+            let lastval = String(group.comment.at(-1)?.commentid || "");
+            for (let pageNo = 0; pageNo < 20; pageNo++) {
+                const page = await client.getSubComments(rootId, lastval);
+                if (!page.comments.length) break;
+                let added = 0;
+                for (const comment of page.comments) {
+                    if (!known.has(String(comment.commentid))) {
+                        known.add(String(comment.commentid));
+                        group.comment.push(comment);
+                        added++;
+                    }
+                }
+                if (!added || !page.lastval || page.lastval === lastval) break;
+                lastval = page.lastval;
+            }
+        });
+        const total = post.link.comment_num || 0;
+        const shown = post.comments.reduce((sum, g) => sum + (g.comment?.length || 0), 0);
+        render(post, shown >= total ? undefined : `共 ${total} 条评论，当前显示 ${shown} 条`);
+    } catch (e) {
+        vscode.window.showErrorMessage(`加载回复失败: ${(e as Error).message || "未知错误"}`);
+    }
+}
+
+async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxClient, linkId: string, loadAll = false, rootId?: string): Promise<void> {
     try {
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "加载帖子中...", cancellable: false }, async () => {
-            const tree = await client.getPostTree(linkId, 0);
+            const tree = await client.getPostTree(linkId, 0, loadAll ? 100 : 20);
             if (!tree || !tree.link) { vscode.window.showWarningMessage("未获取到帖子内容"); return; }
 
             // 记录浏览历史，最多保留 MAX_HISTORY 条，自动去重
@@ -262,43 +296,36 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
 
             let foldedTips = (tree as any)?.folded_comment_tips || "";
 
-            // 尝试不同 sort_filter，选评论数最多的结果
+            // 不要在打开帖子后立即尝试多个排序。link/tree 是风控敏感接口，
+            // 一次打开产生 4 次重复请求很容易被判定为自动化流量。
+            // 默认响应已经包含首屏评论，后续仅按需做分页。
             let bestSort = "";
-            for (const sort of ["", "hot", "time_desc", "time_aes"]) {
-                try {
-                    const retry = await client.getPostTree(linkId, 0, 200, sort || undefined);
-                    if (retry?.comments && retry.comments.length > allCommentGroups.length) {
-                        allCommentGroups = retry.comments;
-                        bestSort = sort;
-                        allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
-                    }
-                    const ft = (retry as any)?.folded_comment_tips;
-                    if (ft) foldedTips = ft;
-                } catch { /* ignore */ }
-            }
 
-            // 串行分页加载全部评论，连续 3 次无新增则停止
+            // 只展示 link/tree 返回的首屏评论。此前这里会串行分页全部评论，
+            // 再逐组请求子评论；帖子内容已经拿到后仍需等待大量请求，明显拖慢点击。
+            // 后续如需完整评论，可由详情页单独触发加载。
             let stoppedByEmpty = false;
-            if (totalCommentNum > allCommentGroups.length) {
-                let nextOffset = allCommentGroups.length;
-                let emptyCount = 0;
-                while (nextOffset < totalCommentNum && emptyCount < 3) {
-                    try {
-                        const r = await client.getPostTree(linkId, nextOffset, 100, bestSort || undefined);
-                        if (!r?.comments || r.comments.length === 0) { emptyCount++; continue; }
-                        let added = 0;
-                        for (const g of r.comments) {
-                            if (g.comment?.[0] && !seenIds.has(g.comment[0].commentid)) {
-                                seenIds.add(g.comment[0].commentid);
-                                allCommentGroups.push(g);
-                                added++;
-                            }
-                        }
-                        if (added === 0) { emptyCount++; } else { emptyCount = 0; }
-                        nextOffset += r.comments.length;
-                    } catch { break; }
+            if (rootId) {
+                const group = allCommentGroups.find(g => g.comment?.[0]?.commentid === rootId);
+                if (group?.comment?.[0]) {
+                    let last = group.comment.at(-1)?.commentid || "";
+                    for (let i = 0; i < 20; i++) {
+                        const page = await client.getSubComments(rootId, last);
+                        if (!page.comments.length) break;
+                        group.comment.push(...page.comments);
+                        if (!page.lastval || page.lastval === last) break;
+                        last = page.lastval;
+                    }
                 }
-                stoppedByEmpty = emptyCount >= 3;
+            }
+            if (loadAll && totalCommentNum > allCommentGroups.length) {
+                let offset = allCommentGroups.length;
+                while (offset < totalCommentNum) {
+                    const page = await client.getPostTree(linkId, offset, 100);
+                    if (!page.comments?.length) { stoppedByEmpty = true; break; }
+                    allCommentGroups.push(...page.comments);
+                    offset += page.comments.length;
+                }
             }
 
             // 组装完整帖子树，根据设置选择在侧边栏或面板中展示
@@ -318,15 +345,38 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             } else {
                 if (currentPanel) currentPanel.dispose();
                 const col = location === "beside" ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
-                currentPanel = vscode.window.createWebviewPanel("heybox.postDetailPanel", stealth ? "README.md" : "帖子", col, { enableScripts: true });
-                currentPanel.webview.html = postHtml(fullTree, stealth, commentNote, foldedTips);
-                currentPanel.onDidDispose(() => { currentPanel = undefined; });
+                const panel = vscode.window.createWebviewPanel("heybox.postDetailPanel", stealth ? "README.md" : "帖子", col, { enableScripts: true });
+                currentPanel = panel;
+                currentPanelPost = fullTree;
+                currentPanelFoldedTips = foldedTips;
+                panel.webview.onDidReceiveMessage((msg) => {
+                    if (msg?.command !== "loadReplies" || typeof msg.linkId !== "string" || typeof msg.rootId !== "string") return;
+                    if (currentPanel !== panel || !currentPanelPost) return;
+                    void loadRepliesForPost(client, currentPanelPost, msg.linkId, msg.rootId, (updated, note) => {
+                        if (currentPanel !== panel) return;
+                        currentPanelPost = updated;
+                        panel.webview.html = postHtml(updated, isStealthMode(), note, currentPanelFoldedTips);
+                    });
+                });
+                panel.webview.html = postHtml(fullTree, stealth, commentNote, foldedTips);
+                panel.onDidDispose(() => {
+                    if (currentPanel === panel) {
+                        currentPanel = undefined;
+                        currentPanelPost = undefined;
+                        currentPanelFoldedTips = "";
+                    }
+                });
             }
         });
     } catch (e) {
         const msg = (e as Error).message || "";
         if (msg.includes("超时")) vscode.window.showErrorMessage("请求超时，请检查网络连接");
         else if (msg.includes("Cookie")) vscode.window.showErrorMessage(msg);
+        else if (msg.includes("show_captcha")) {
+            vscode.window.showErrorMessage(
+                "帖子详情被服务端风控拦截，请在浏览器中完成人机验证后，重新复制 Cookie 并手动粘贴登录。",
+            );
+        }
         else vscode.window.showErrorMessage(`获取帖子详情失败: ${msg}`);
     }
 }
@@ -334,7 +384,7 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
 /**
  * 检查 Cookie 是否已配置，未配置时弹窗提供快捷操作
  */
-function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxClient): void {
+function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxClient, statusBarItem?: vscode.StatusBarItem): void {
     let cookie = client.getCookie();
 
     if (!cookie) {
@@ -346,6 +396,36 @@ function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxCl
             if (c === "查看教程") vscode.commands.executeCommand("workbench.action.openWalkthrough", "heybox.heybox-forum.heybox.walkthrough");
             if (c === "从剪贴板导入") importCookieFromClipboard(context, client);
         });
+    }
+}
+
+/**
+ * 登录成功后的统一处理 — 提示并刷新列表，启动消息轮询
+ */
+function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem): void {
+    vscode.window.showInformationMessage("登录成功！");
+    postListProvider?.refresh();
+    if (!pollTimer && statusBarItem) {
+        startPolling(client, statusBarItem, context);
+    }
+}
+
+/**
+ * 手动粘贴 Cookie 登录
+ */
+async function loginByPaste(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem): Promise<void> {
+    const cookie = await vscode.window.showInputBox({
+        prompt: "请输入小黑盒 Cookie",
+        placeHolder: "从浏览器开发者工具复制的 Cookie",
+        password: true,
+        ignoreFocusOut: true
+    });
+    if (!cookie) return;
+    if (client.validateCookie(cookie)) {
+        await client.setCookie(cookie);
+        onLoginSuccess(client, context, statusBarItem);
+    } else {
+        vscode.window.showErrorMessage("Cookie 格式无效，需要包含 heybox_id 或 x_xhh_tokenid");
     }
 }
 
@@ -472,3 +552,4 @@ export function deactivate(): void {
     postListProvider?.dispose();
     if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
 }
+

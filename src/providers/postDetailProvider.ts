@@ -14,7 +14,7 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
     /** 被折叠评论的提示文案 */
     private _foldedTips: string = "";
 
-    constructor(private readonly extensionUri: vscode.Uri) {}
+    constructor(private readonly extensionUri: vscode.Uri, private readonly onLoadAll?: (linkId: string, rootId?: string) => void) {}
 
     /**
      * VSCode 回调：当面板首次被激活时调用
@@ -24,6 +24,9 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
     resolveWebviewView(webviewView: vscode.WebviewView): void {
         this._view = webviewView;
         webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
+        webviewView.webview.onDidReceiveMessage((msg) => {
+            if (msg?.command === "loadReplies" && typeof msg.linkId === "string") this.onLoadAll?.(msg.linkId, msg.rootId);
+        });
         webviewView.title = getPanelTitle();
         if (this._currentPost) {
             this._view.webview.html = postHtml(this._currentPost, isStealth(), undefined, this._foldedTips);
@@ -33,6 +36,12 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
     }
 
     isViewVisible(): boolean { return !!this._view; }
+
+    /** 返回当前详情数据，供按评论组懒加载时在原数据上追加回复。 */
+    getCurrentPost(): PostTreeResult | undefined { return this._currentPost; }
+
+    /** 返回当前详情的折叠评论提示，供重新渲染时保留。 */
+    getFoldedTips(): string { return this._foldedTips; }
 
     /**
      * 在面板中展示指定帖子

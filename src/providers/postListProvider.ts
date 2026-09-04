@@ -282,20 +282,12 @@ export class PostListProvider
         this.fetchFavCounts(this.topicPosts.get(topicId) || []);
     }
 
-    /**
-     * 批量获取帖子的收藏数，每批 5 个并发请求
-     * 结果缓存到 favCache，用于在树项上显示收藏图标
-     */
+    /** 使用列表接口已有的收藏数，避免为列表展示额外请求帖子详情接口。 */
     private async fetchFavCounts(posts: SearchItemInfo[]): Promise<void> {
-        const toFetch = posts.filter(p => !this.favCache.has(p.linkid));
-        for (let i = 0; i < toFetch.length; i += 5) {
-            const batch = toFetch.slice(i, i + 5);
-            await Promise.all(batch.map(async (p) => {
-                try {
-                    const tree = await this.client.getPostTree(String(p.linkid), 0, 0);
-                    this.favCache.set(p.linkid, tree.link.favour_count);
-                } catch {}
-            }));
+        for (const post of posts) {
+            if (typeof post.favour_count === "number") {
+                this.favCache.set(post.linkid, post.favour_count);
+            }
         }
         this._onDidChangeTreeData.fire();
     }

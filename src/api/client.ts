@@ -185,6 +185,21 @@ export class HeyBoxClient {
         return this.get<PostTreeResult>("/bbs/app/link/tree", p);
     }
 
+    /** 获取某条主评论下的子评论（回复），支持使用上一页最后一条评论 ID 分页。 */
+    async getSubComments(rootCommentId: string, lastval: string = ""): Promise<{ comments: import("../types").Comment[]; lastval: string }> {
+        const result = await this.get<any>("/bbs/app/comment/sub/comments", {
+            root_comment_id: rootCommentId,
+            lastval,
+        });
+        const comments = Array.isArray(result?.comments)
+            ? result.comments
+            : Array.isArray(result?.comment) ? result.comment : [];
+        return {
+            comments,
+            lastval: String(result?.lastval ?? comments.at(-1)?.commentid ?? ""),
+        };
+    }
+
     /**
      * 搜索帖子
      * @param query 搜索关键词
@@ -346,3 +361,4 @@ export class HeyBoxClient {
         return this.context;
     }
 }
+
