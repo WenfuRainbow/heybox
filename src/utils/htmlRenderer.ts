@@ -43,18 +43,49 @@ function escHtml(value: unknown): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
+/** Render a rich HTML content block while allowing only safe presentation tags. */
+function renderHtmlBlock(value: unknown): string {
+    if (typeof value !== "string" || !value) return "";
+    return value
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/<\/?(script|style|iframe|object|embed|form)(?:\s[^>]*)?>[\s\S]*?<\/?\1\s*>/gi, "")
+        .replace(/<([a-z][a-z0-9]*)\b([^>]*)>/gi, (full, tag: string, attrs: string) => {
+            const name = tag.toLowerCase();
+            if (!["p", "br", "div", "span", "strong", "b", "em", "i", "u", "ol", "ul", "li", "blockquote", "img", "a"].includes(name)) return "";
+            if (name === "br") return "<br>";
+            if (name === "img") {
+                const src = attrs.match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1] || "";
+                if (!/^https?:\/\//i.test(src) && !/^data:image\//i.test(src)) return "";
+                const alt = attrs.match(/\balt\s*=\s*["']([^"']*)["']/i)?.[1] || "帖子图片";
+                return `<img src="${escHtml(src)}" alt="${escHtml(alt)}" loading="lazy" />`;
+            }
+            if (name === "a") {
+                const href = attrs.match(/\bhref\s*=\s*["'](https?:\/\/[^"']+)["']/i)?.[1];
+                return href ? `<a href="${escHtml(href)}">` : "";
+            }
+            return `<${name}>`;
+        })
+        .replace(/<\/([a-z][a-z0-9]*)\s*>/gi, (full, tag: string) => {
+            const name = tag.toLowerCase();
+            return ["p", "div", "span", "strong", "b", "em", "i", "u", "ol", "ul", "li", "blockquote", "a"].includes(name)
+                ? `</${name}>`
+                : "";
+        });
+}
+
 /**
  * 渲染帖子正文内容
- * 支持两种格式：JSON 数组（含 img/text 类型块）和纯文本
+ * 支持 JSON 数组（含 html/img/text 类型块）和纯文本
  */
 function renderContent(text: string): string {
     if (!text) return "";
     try {
         const blocks = JSON.parse(text);
         if (Array.isArray(blocks)) {
-            return blocks.map((b: { type: string; url?: string; text?: string }) => {
+            return blocks.map((b: { type: string; url?: string; text?: string; html?: string }) => {
                 if (b.type === "img" && b.url) return `<img src="${escHtml(b.url)}" alt="帖子图片" loading="lazy" />`;
                 if (b.type === "text" && b.text) return `<p>${escHtml(b.text)}</p>`;
+                if (b.type === "html") return renderHtmlBlock(b.html || b.text || "");
                 return "";
             }).join("");
         }
