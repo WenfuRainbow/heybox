@@ -37,8 +37,9 @@ function formatTs(ts: number): string {
 }
 
 /** HTML 实体转义，防止 XSS 注入 */
-function escHtml(s: string): string {
-    if (!s) return "";
+function escHtml(value: unknown): string {
+    if (value === null || value === undefined) return "";
+    const s = String(value);
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
@@ -101,8 +102,16 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     const commentsHtml = commentGroups.map((g) => {
         if (!g.comment || g.comment.length === 0) return "";
         const main = renderCommentHtml(g.comment[0], false, stealth);
+        const root = g.comment[0] as Comment & { reply_num?: number; sub_comment_num?: number; reply_count?: number };
+        const replyCount = root.reply_num ?? root.sub_comment_num ?? root.reply_count ?? 0;
         const subs = g.comment.slice(1).map((c) => renderCommentHtml(c, true, stealth)).join("");
-        return `<section class="cg" aria-label="评论组">${main}${subs}</section>`;
+        // 小黑盒接口并不总会返回回复总数字段。仍为每条主评论提供按需加载入口；
+        // 有可靠计数时展示“全部 N 条回复”，否则使用不作数量承诺的“加载回复”。
+        const moreLabel = replyCount > g.comment.length - 1
+            ? `全部 ${replyCount} 条回复`
+            : "加载回复";
+        const more = `<button class="loadReplies" data-root="${escHtml(root.commentid)}" style="margin-left:46px;padding:4px 8px;cursor:pointer">${moreLabel}</button>`;
+        return `<section class="cg" aria-label="评论组">${main}${subs}${more}</section>`;
     }).join("");
 
     const themeOverrides = getThemeOverrides();
@@ -182,6 +191,7 @@ function showPreview(cx, cy){
 document.addEventListener('mouseover',function(e){var t=e.target;if(t.tagName==='IMG'&&t.closest('.body img,.cimg')){pi.src=t.src;showPreview(e.clientX, e.clientY)}});
 document.addEventListener('mouseout',function(e){if(e.target.tagName==='IMG'&&e.target.closest('.body img,.cimg'))pv.style.display='none'});
 document.addEventListener('mousemove',function(e){if(pv.style.display==='block')showPreview(e.clientX, e.clientY)});
+document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){b.disabled=true;b.textContent='正在加载…';acquireVsCodeApi().postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});
 })();
 </script>
 </body></html>`;

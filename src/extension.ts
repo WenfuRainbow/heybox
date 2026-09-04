@@ -48,7 +48,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(treeView);
 
     // 注册帖子详情 Webview 视图
-    postDetailProvider = new PostDetailViewProvider(context.extensionUri);
+    postDetailProvider = new PostDetailViewProvider(context.extensionUri, (id, rootId) => {
+        if (rootId) void loadRepliesForCurrentPost(client, id, rootId);
+    });
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
     // 应用隐身模式设置
@@ -235,10 +237,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
  * @param client  - API 客户端
  * @param linkId  - 帖子 ID
  */
-async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxClient, linkId: string): Promise<void> {
+/** 仅为当前评论组追加子回复，避免重新请求整帖后覆盖已加载的数据。 */
+async function loadRepliesForCurrentPost(client: HeyBoxClient, linkId: string, rootId: string): Promise<void> {
+    const post = postDetailProvider?.getCurrentPost();
+    if (!post || String(post.link.linkid) !== linkId) return;
+    const group = post.comments?.find(g => String(g.comment?.[0]?.commentid) === rootId);
+    if (!group?.comment?.[0]) return;
+
+    try {
+        await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "加载回复中...", cancellable: false }, async () => {
+            const known = new Set(group.comment.map(c => String(c.commentid)));
+            let lastval = String(group.comment.at(-1)?.commentid || "");
+            for (let pageNo = 0; pageNo < 20; pageNo++) {
+                const page = await client.getSubComments(rootId, lastval);
+                if (!page.comments.length) break;
+                let added = 0;
+                for (const comment of page.comments) {
+                    if (!known.has(String(comment.commentid))) {
+                        known.add(String(comment.commentid));
+                        group.comment.push(comment);
+                        added++;
+                    }
+                }
+                if (!added || !page.lastval || page.lastval === lastval) break;
+                lastval = page.lastval;
+            }
+        });
+        const total = post.link.comment_num || 0;
+        const shown = post.comments.reduce((sum, g) => sum + (g.comment?.length || 0), 0);
+        postDetailProvider?.showPost(post, shown >= total ? undefined : `共 ${total} 条评论，当前显示 ${shown} 条`);
+    } catch (e) {
+        vscode.window.showErrorMessage(`加载回复失败: ${(e as Error).message || "未知错误"}`);
+    }
+}
+
+async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxClient, linkId: string, loadAll = false, rootId?: string): Promise<void> {
     try {
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "加载帖子中...", cancellable: false }, async () => {
-            const tree = await client.getPostTree(linkId, 0);
+            const tree = await client.getPostTree(linkId, 0, loadAll ? 100 : 20);
             if (!tree || !tree.link) { vscode.window.showWarningMessage("未获取到帖子内容"); return; }
 
             // 记录浏览历史，最多保留 MAX_HISTORY 条，自动去重
@@ -256,72 +292,35 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
 
             let foldedTips = (tree as any)?.folded_comment_tips || "";
 
-            // 尝试不同 sort_filter，选评论数最多的结果
+            // 不要在打开帖子后立即尝试多个排序。link/tree 是风控敏感接口，
+            // 一次打开产生 4 次重复请求很容易被判定为自动化流量。
+            // 默认响应已经包含首屏评论，后续仅按需做分页。
             let bestSort = "";
-            for (const sort of ["", "hot", "time_desc", "time_aes"]) {
-                try {
-                    const retry = await client.getPostTree(linkId, 0, 200, sort || undefined);
-                    if (retry?.comments && retry.comments.length > allCommentGroups.length) {
-                        allCommentGroups = retry.comments;
-                        bestSort = sort;
-                        allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
-                    }
-                    const ft = (retry as any)?.folded_comment_tips;
-                    if (ft) foldedTips = ft;
-                } catch { /* ignore */ }
-            }
 
-            // 串行分页加载全部评论，连续 3 次无新增则停止
+            // 只展示 link/tree 返回的首屏评论。此前这里会串行分页全部评论，
+            // 再逐组请求子评论；帖子内容已经拿到后仍需等待大量请求，明显拖慢点击。
+            // 后续如需完整评论，可由详情页单独触发加载。
             let stoppedByEmpty = false;
-            if (totalCommentNum > allCommentGroups.length) {
-                let nextOffset = allCommentGroups.length;
-                let emptyCount = 0;
-                while (nextOffset < totalCommentNum && emptyCount < 3) {
-                    try {
-                        const r = await client.getPostTree(linkId, nextOffset, 100, bestSort || undefined);
-                        if (!r?.comments || r.comments.length === 0) { emptyCount++; continue; }
-                        let added = 0;
-                        for (const g of r.comments) {
-                            if (g.comment?.[0] && !seenIds.has(g.comment[0].commentid)) {
-                                seenIds.add(g.comment[0].commentid);
-                                allCommentGroups.push(g);
-                                added++;
-                            }
-                        }
-                        if (added === 0) { emptyCount++; } else { emptyCount = 0; }
-                        nextOffset += r.comments.length;
-                    } catch { break; }
-                }
-                stoppedByEmpty = emptyCount >= 3;
-            }
-
-            // link/tree 默认只带每组前两条回复；继续调用网页端使用的子评论接口，
-            // 按 lastval 分页，确保“全部 N 条回复”不会被截断。
-            for (const group of allCommentGroups) {
-                if (!group.comment || group.comment.length === 0) continue;
-                const root = group.comment[0];
-                const existing = new Set(group.comment.map(c => c.commentid));
-                let lastval = group.comment.at(-1)?.commentid || "";
-                let emptyCount = 0;
-                while (emptyCount < 2) {
-                    try {
-                        const page = await client.getSubComments(root.commentid, lastval);
+            if (rootId) {
+                const group = allCommentGroups.find(g => g.comment?.[0]?.commentid === rootId);
+                if (group?.comment?.[0]) {
+                    let last = group.comment.at(-1)?.commentid || "";
+                    for (let i = 0; i < 20; i++) {
+                        const page = await client.getSubComments(rootId, last);
                         if (!page.comments.length) break;
-                        let added = 0;
-                        for (const comment of page.comments) {
-                            if (!existing.has(comment.commentid)) {
-                                existing.add(comment.commentid);
-                                group.comment.push(comment);
-                                added++;
-                            }
-                        }
-                        const next = page.lastval;
-                        if (!added || !next || next === lastval) break;
-                        lastval = next;
-                        emptyCount = 0;
-                    } catch {
-                        break;
+                        group.comment.push(...page.comments);
+                        if (!page.lastval || page.lastval === last) break;
+                        last = page.lastval;
                     }
+                }
+            }
+            if (loadAll && totalCommentNum > allCommentGroups.length) {
+                let offset = allCommentGroups.length;
+                while (offset < totalCommentNum) {
+                    const page = await client.getPostTree(linkId, offset, 100);
+                    if (!page.comments?.length) { stoppedByEmpty = true; break; }
+                    allCommentGroups.push(...page.comments);
+                    offset += page.comments.length;
                 }
             }
 
@@ -351,7 +350,13 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
         const msg = (e as Error).message || "";
         if (msg.includes("超时")) vscode.window.showErrorMessage("请求超时，请检查网络连接");
         else if (msg.includes("Cookie")) vscode.window.showErrorMessage(msg);
-        else if (msg.includes("show_captcha")) vscode.window.showErrorMessage("帖子详情被服务端风控拦截（需人机验证）。请稍后重试；若持续出现，请重新登录并在弹出的浏览器中完成人机验证后再操作");
+        else if (msg.includes("show_captcha")) {
+            const action = await vscode.window.showErrorMessage(
+                "帖子详情被服务端风控拦截，需要在真实浏览器中完成人机验证。",
+                "打开浏览器验证", "稍后重试",
+            );
+            if (action === "打开浏览器验证") void handleBrowserLogin(client, context);
+        }
         else vscode.window.showErrorMessage(`获取帖子详情失败: ${msg}`);
     }
 }
