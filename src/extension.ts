@@ -16,6 +16,7 @@ import { PostListProvider, toggleFav, getFavs } from "./providers/postListProvid
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
 import { SearchItemInfo, PostTreeResult } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
+import { showQrLoginPanel } from "./auth/qrLoginPanel";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
@@ -178,9 +179,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         await vscode.commands.executeCommand("workbench.action.toggleSidebarVisibility");
     }));
 
-    // 登录命令 — 手动粘贴 Cookie
+    // 登录命令 — 默认使用手机扫码，手动 Cookie 仅作为兼容兜底。
     context.subscriptions.push(vscode.commands.registerCommand("heybox.login", async () => {
-        await loginByPaste(client, context, statusBarItem);
+        await showQrLoginPanel(
+            context,
+            client,
+            async (nickname) => onLoginSuccess(client, context, statusBarItem, nickname),
+            async () => loginByPaste(client, context, statusBarItem),
+        );
     }));
 
     // 退出登录 — 清除 Cookie 并停止轮询
@@ -374,7 +380,7 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
         else if (msg.includes("Cookie")) vscode.window.showErrorMessage(msg);
         else if (msg.includes("show_captcha")) {
             vscode.window.showErrorMessage(
-                "帖子详情被服务端风控拦截，请在浏览器中完成人机验证后，重新复制 Cookie 并手动粘贴登录。",
+                "帖子详情被服务端风控拦截，请在浏览器中完成人机验证后重新扫码登录。",
             );
         }
         else vscode.window.showErrorMessage(`获取帖子详情失败: ${msg}`);
@@ -389,9 +395,10 @@ function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxCl
 
     if (!cookie) {
         vscode.window.showWarningMessage(
-            "HeyBox 插件需要配置 Cookie 才能使用。",
-            "从剪贴板导入", "打开设置", "查看教程"
+            "HeyBox 插件需要登录后才能使用。",
+            "扫码登录", "从剪贴板导入", "打开设置", "查看教程"
         ).then(c => {
+            if (c === "扫码登录") vscode.commands.executeCommand("heybox.login");
             if (c === "打开设置") vscode.commands.executeCommand("workbench.action.openSettings", "heybox.cookie");
             if (c === "查看教程") vscode.commands.executeCommand("workbench.action.openWalkthrough", "heybox.heybox-forum.heybox.walkthrough");
             if (c === "从剪贴板导入") importCookieFromClipboard(context, client);
@@ -402,8 +409,8 @@ function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxCl
 /**
  * 登录成功后的统一处理 — 提示并刷新列表，启动消息轮询
  */
-function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem): void {
-    vscode.window.showInformationMessage("登录成功！");
+function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem, nickname?: string): void {
+    vscode.window.showInformationMessage(nickname ? `登录成功，欢迎你，${nickname}！` : "登录成功！");
     postListProvider?.refresh();
     if (!pollTimer && statusBarItem) {
         startPolling(client, statusBarItem, context);
@@ -411,7 +418,7 @@ function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, 
 }
 
 /**
- * 手动粘贴 Cookie 登录
+ * 手动粘贴 Cookie 登录（扫码异常时的兼容兜底）
  */
 async function loginByPaste(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem): Promise<void> {
     const cookie = await vscode.window.showInputBox({

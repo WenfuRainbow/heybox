@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "kyo",
   "icon": "resources/icon.png",
   "engines": {
@@ -225,7 +225,7 @@
             {
               "id": "setupCookie",
               "title": "1️⃣ 配置 Cookie",
-              "description": "点击侧边栏登录按钮，粘贴从小黑盒网站复制的 Cookie 值；或打开设置搜索 ``heybox.cookie`` 手动配置。\n\n**如何手动获取 Cookie？**\n1. 打开浏览器访问 xiaoheihe.cn 并登录\n2. 按 F12 → Network → 刷新页面\n3. 复制任意请求的 Cookie 头",
+              "description": "点击侧边栏登录按钮，使用小黑盒 App 扫描二维码并在手机上确认即可登录。登录凭证会自动保存到 VS Code 安全存储中。\n\n若扫码异常，可在扫码面板选择“粘贴 Cookie”作为兼容兜底。",
               "completionEvents": [
                 "onSettingChanged:heybox.cookie"
               ],
@@ -265,7 +265,7 @@
         "heybox.cookie": {
           "type": "string",
           "default": "",
-          "description": "小黑盒网站 Cookie（从浏览器开发者工具复制完整的 Cookie 头值）"
+          "description": "小黑盒登录凭证（扫码登录后自动保存到安全存储；此项仅兼容手动导入）"
         },
         "heybox.deviceId": {
           "type": "string",
@@ -330,8 +330,11 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
+    "@types/qrcode": "^1.5.6",
     "@types/vscode": "^1.85.0",
     "typescript": "^5.3.0"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
   }
 }
-

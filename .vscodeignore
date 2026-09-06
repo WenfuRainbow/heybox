@@ -2,7 +2,6 @@
 .vscode-test/**
 .vscode/**
 src/**
-node_modules/**
 test**
 *.ts
 **/*.map
@@ -13,4 +12,9 @@ topic_*.js
 tsconfig.json
 LICENSE
 .mimocode/**
+out/auth/authManager.js
+out/auth/browserLogin.js
+out/auth/cookieExtractor.js
+out/auth/index.js
+out/auth/providers/**
 .gitignore

@@ -14,6 +14,30 @@ import {
 const API_BASE = "https://api.xiaoheihe.cn";
 const REFERER = "https://www.xiaoheihe.cn/";
 
+export type QrLoginState = "waiting" | "scanned" | "success" | "expired" | "failed";
+
+/** 仅保存在扩展进程内的扫码会话，绝不发送给 Webview。 */
+export interface QrLoginSession {
+    qrContent: string;
+    expiresAt: number;
+    pollParams: Record<string, string>;
+    cookies: Record<string, string>;
+}
+
+export interface QrLoginStatus {
+    state: QrLoginState;
+    message: string;
+    remainingSeconds: number;
+    /** 仅 state === success 时存在，调用者应立即存入 SecretStorage。 */
+    cookie?: string;
+    nickname?: string;
+}
+
+interface AnonymousResponse<T> {
+    payload: ApiResponse<T>;
+    cookies: Record<string, string>;
+}
+
 /**
  * HeyBox API 客户端类
  * 提供与小黑盒服务器通信的方法，处理认证、请求签名和数据解析
@@ -83,6 +107,16 @@ export class HeyBoxClient {
         };
     }
 
+    /** 二维码登录采用网页端匿名客户端参数，且不携带已有登录会话。 */
+    private getQrLoginParams(): Record<string, string> {
+        return {
+            ...this.getCommonParams(),
+            app: "web",
+            heybox_id: "",
+            _notip: "true",
+        };
+    }
+
     /**
      * 构建完整的 API URL
      * 将路径、签名和额外参数组合成完整的请求 URL
@@ -90,9 +124,9 @@ export class HeyBoxClient {
      * @param extraParams 额外的查询参数
      * @returns 完整的 URL 字符串
      */
-    private buildUrl(path: string, extraParams?: Record<string, string>): string {
+    private buildUrl(path: string, extraParams?: Record<string, string>, commonParams = this.getCommonParams()): string {
         const sig: Signature = generateSignature(path);
-        const params = { ...this.getCommonParams(), hkey: sig.hkey, _time: String(sig._time), nonce: sig.nonce, ...(extraParams || {}) };
+        const params = { ...commonParams, hkey: sig.hkey, _time: String(sig._time), nonce: sig.nonce, ...(extraParams || {}) };
         return `${API_BASE}${path}?${Object.entries(params).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&")}`;
     }
 
@@ -101,13 +135,74 @@ export class HeyBoxClient {
      * 包含浏览器模拟信息、Cookie 和必要的请求头
      * @returns 请求头对象
      */
-    private buildHeaders(): Record<string, string> {
+    private buildHeaders(cookie = this.cookie): Record<string, string> {
         return {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             Accept: "*/*", "Accept-Language": "zh-CN,zh;q=0.9",
             Referer: REFERER, Origin: "https://www.xiaoheihe.cn",
-            Cookie: this.cookie,
+            Cookie: cookie,
         };
+    }
+
+    /** 从响应 Set-Cookie 中提取 name=value；属性永不持久化或展示。 */
+    private responseCookies(res: import("http").IncomingMessage): Record<string, string> {
+        const raw = res.headers["set-cookie"];
+        const cookies = Array.isArray(raw) ? raw : raw ? [raw] : [];
+        const result: Record<string, string> = {};
+        for (const cookie of cookies) {
+            const match = /^\s*([^=;\s]+)=([^;]*)/.exec(cookie);
+            if (match) result[match[1]] = match[2];
+        }
+        return result;
+    }
+
+    private cookieHeader(cookies: Record<string, string>): string {
+        return Object.entries(cookies).map(([name, value]) => `${name}=${value}`).join("; ");
+    }
+
+    private mergeLoginFields(cookies: Record<string, string>, value: unknown): { nickname: string; userId: string } {
+        const result = value && typeof value === "object" ? value as Record<string, unknown> : {};
+        const nested = [result, result.user, result.account, result.profile]
+            .filter((item): item is Record<string, unknown> => !!item && typeof item === "object");
+        const first = (...keys: string[]): string => {
+            for (const source of nested) {
+                for (const key of keys) {
+                    const candidate = source[key];
+                    if (candidate !== undefined && candidate !== null && String(candidate)) return String(candidate);
+                }
+            }
+            return "";
+        };
+        const userId = first("heybox_id", "user_heybox_id", "heyboxid", "userid", "user_id", "uid", "id");
+        const pkey = first("pkey", "user_pkey", "key");
+        const token = first("x_xhh_tokenid");
+        if (userId && !cookies.heybox_id) cookies.heybox_id = userId;
+        if (pkey && !cookies.pkey && !cookies.user_pkey) cookies.pkey = pkey;
+        if (token && !cookies.x_xhh_tokenid) cookies.x_xhh_tokenid = token;
+        return { userId, nickname: first("nickname", "username", "name") };
+    }
+
+    /** 执行不需要登录态的请求，并把 Set-Cookie 保留给二维码会话。 */
+    private async anonymousGet<T>(path: string, params: Record<string, string>, cookies: Record<string, string>): Promise<AnonymousResponse<T>> {
+        const url = this.buildUrl(path, params, this.getQrLoginParams());
+        const headers = this.buildHeaders(this.cookieHeader(cookies));
+        return new Promise<AnonymousResponse<T>>((resolve, reject) => {
+            const req = https.get(url, { headers }, (res) => {
+                let data = "";
+                res.on("data", (chunk) => (data += chunk));
+                res.on("end", () => {
+                    try {
+                        const payload: ApiResponse<T> = JSON.parse(data);
+                        resolve({ payload, cookies: this.responseCookies(res) });
+                    } catch {
+                        reject(new Error(`解析二维码登录响应失败: ${data.substring(0, 200)}`));
+                    }
+                });
+                res.on("error", reject);
+            });
+            req.setTimeout(15000, () => { req.destroy(); reject(new Error("二维码登录请求超时，请检查网络")); });
+            req.on("error", (e: NodeJS.ErrnoException) => reject(new Error(`二维码登录网络错误: ${e.message}`)));
+        });
     }
 
     /**
@@ -296,6 +391,73 @@ export class HeyBoxClient {
         });
     }
 
+    /** 创建二维码登录会话。二维码内容只用于本地渲染，凭证始终留在扩展进程内。 */
+    async startQrLogin(): Promise<QrLoginSession> {
+        const response = await this.anonymousGet<{ qr_url?: unknown; qrcode?: unknown; url?: unknown; expire?: unknown; expires_in?: unknown }>(
+            "/account/get_qrcode_url/", {}, {}
+        );
+        if (response.payload.status !== "ok") {
+            throw new Error(response.payload.msg || `获取二维码失败: ${response.payload.status}`);
+        }
+        const result = response.payload.result || {};
+        const qrContent = String(result.qr_url || result.qrcode || result.url || "");
+        if (!qrContent) throw new Error("二维码响应缺少二维码地址");
+
+        let pollParams: Record<string, string> = {};
+        try {
+            pollParams = Object.fromEntries(new URL(qrContent).searchParams.entries());
+        } catch {
+            throw new Error("二维码地址格式无效");
+        }
+        if (Object.keys(pollParams).length === 0) throw new Error("二维码响应缺少轮询参数");
+
+        const rawExpiry = Number(result.expire ?? result.expires_in ?? 120);
+        const ttlSeconds = Number.isFinite(rawExpiry)
+            ? Math.max(10, Math.min(rawExpiry > 10_000_000_000 ? (rawExpiry - Date.now()) / 1000 : rawExpiry, 600))
+            : 120;
+        return {
+            qrContent,
+            expiresAt: Date.now() + ttlSeconds * 1000,
+            pollParams,
+            cookies: { ...response.cookies },
+        };
+    }
+
+    /** 查询扫码状态；成功时返回可直接保存的完整 Cookie Header。 */
+    async pollQrLogin(session: QrLoginSession): Promise<QrLoginStatus> {
+        const remainingSeconds = Math.max(0, Math.ceil((session.expiresAt - Date.now()) / 1000));
+        if (remainingSeconds === 0) return { state: "expired", message: "二维码已过期", remainingSeconds: 0 };
+
+        const response = await this.anonymousGet<Record<string, unknown>>(
+            "/account/qr_state/", session.pollParams, session.cookies
+        );
+        Object.assign(session.cookies, response.cookies);
+        const result = response.payload.result && typeof response.payload.result === "object"
+            ? response.payload.result as Record<string, unknown>
+            : {};
+        const message = String(result.error_msg || result.message || result.msg || response.payload.msg || "");
+        const marker = String(result.error || result.err || result.state || result.status || "").trim().toLowerCase();
+
+        if (marker === "ok" || marker === "success" || marker === "confirmed" || marker === "2") {
+            const identity = this.mergeLoginFields(session.cookies, result);
+            const cookie = this.cookieHeader(session.cookies);
+            if (!this.validateCookie(cookie)) {
+                return { state: "failed", message: "登录成功响应未包含可用凭证，请重新扫码", remainingSeconds };
+            }
+            return { state: "success", message: "登录成功", remainingSeconds, cookie, nickname: identity.nickname };
+        }
+        if (["scanned", "ready", "confirm", "1"].includes(marker)) {
+            return { state: "scanned", message: message || "已扫码，请在手机上确认登录", remainingSeconds };
+        }
+        if (["expired", "timeout", "3"].includes(marker) || /过期|失效|超时/i.test(message)) {
+            return { state: "expired", message: message || "二维码已过期", remainingSeconds: 0 };
+        }
+        if (["failed", "error", "-1"].includes(marker)) {
+            return { state: "failed", message: message || "扫码登录失败", remainingSeconds };
+        }
+        return { state: "waiting", message: message || "请使用小黑盒 App 扫码", remainingSeconds };
+    }
+
     /**
      * 设置并保存 Cookie（仅存储到 SecretStorage，不写入明文 settings）
      * 同时从 cookie 中提取 heybox_id 并更新配置
@@ -305,14 +467,12 @@ export class HeyBoxClient {
         this.cookie = cookie;
         await this.context.secrets.store("heybox.cookie", cookie);
 
-        // 提取 heybox_id 并更新配置
-        if (!this.heyboxId && cookie) {
-            const m = cookie.match(/heybox_id=(\d+)/);
-            if (m) {
-                this.heyboxId = m[1];
-                const config = vscode.workspace.getConfiguration("heybox");
-                await config.update("heyboxId", this.heyboxId, vscode.ConfigurationTarget.Global);
-            }
+        // 从手动或扫码登录凭证中提取用户 ID，并覆盖可能已失效的旧账号 ID。
+        const m = cookie.match(/(?:heybox_id|user_heybox_id|heyboxid)=(\d+)/);
+        if (m) {
+            this.heyboxId = m[1];
+            const config = vscode.workspace.getConfiguration("heybox");
+            await config.update("heyboxId", this.heyboxId, vscode.ConfigurationTarget.Global);
         }
     }
 
@@ -328,7 +488,9 @@ export class HeyBoxClient {
         if (trimmed.length === 0) return false;
 
         return trimmed.includes('heybox_id=') ||
+               trimmed.includes('user_heybox_id=') ||
                trimmed.includes('x_xhh_tokenid=') ||
+               trimmed.includes('pkey=') ||
                trimmed.includes('user_pkey=');
     }
 
