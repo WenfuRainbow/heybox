@@ -43,18 +43,83 @@ function escHtml(value: unknown): string {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
 }
 
+/** 用图片文件名识别 HTML 定位图与数组末尾的缩略图副本。 */
+function imageKey(url: string): string {
+    try {
+        const pathname = new URL(url).pathname;
+        return pathname.substring(pathname.lastIndexOf("/") + 1).toLowerCase();
+    } catch {
+        return url.split("?")[0].substring(url.lastIndexOf("/") + 1).toLowerCase();
+    }
+}
+
+function readHtmlAttribute(attrs: string, name: string): string {
+    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = attrs.match(new RegExp(`\\b${escapedName}\\s*=\\s*(?:["']([^"']*)["']|([^\\s>]+))`, "i"));
+    return match?.[1] || match?.[2] || "";
+}
+
+/** 清洗富文本 HTML，同时恢复 data-original/data-src 中的正文定位图片。 */
+function renderHtmlBlock(value: unknown, embeddedImageKeys: Set<string>): string {
+    if (typeof value !== "string" || !value) return "";
+    return value
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/<(script|style|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+        .replace(/<([a-z][a-z0-9]*)\b([^>]*)>/gi, (_full, tag: string, attrs: string) => {
+            const name = tag.toLowerCase();
+            if (!["p", "br", "div", "span", "strong", "b", "em", "i", "u", "ol", "ul", "li", "blockquote", "img", "a"].includes(name)) return "";
+            if (name === "br") return "<br>";
+            if (name === "img") {
+                const src = readHtmlAttribute(attrs, "data-original")
+                    || readHtmlAttribute(attrs, "data-src")
+                    || readHtmlAttribute(attrs, "src");
+                if (!/^https?:\/\//i.test(src) && !/^data:image\//i.test(src)) return "";
+                const key = imageKey(src);
+                if (key) embeddedImageKeys.add(key);
+                const alt = readHtmlAttribute(attrs, "alt") || "帖子图片";
+                return `<img src="${escHtml(src)}" alt="${escHtml(alt)}" loading="lazy" />`;
+            }
+            if (name === "a") {
+                const href = readHtmlAttribute(attrs, "href");
+                return /^https?:\/\//i.test(href) ? `<a href="${escHtml(href)}">` : "";
+            }
+            return `<${name}>`;
+        })
+        .replace(/<\/([a-z][a-z0-9]*)\s*>/gi, (_full, tag: string) => {
+            const name = tag.toLowerCase();
+            return ["p", "div", "span", "strong", "b", "em", "i", "u", "ol", "ul", "li", "blockquote", "a"].includes(name)
+                ? `</${name}>`
+                : "";
+        });
+}
+
 /**
  * 渲染帖子正文内容
- * 支持两种格式：JSON 数组（含 img/text 类型块）和纯文本
+ * 富文本 HTML 自带图片的原始位置；数组末尾重复的图片块会被过滤。
  */
 function renderContent(text: string): string {
     if (!text) return "";
     try {
         const blocks = JSON.parse(text);
         if (Array.isArray(blocks)) {
-            return blocks.map((b: { type: string; url?: string; text?: string }) => {
-                if (b.type === "img" && b.url) return `<img src="${escHtml(b.url)}" alt="帖子图片" loading="lazy" />`;
-                if (b.type === "text" && b.text) return `<p>${escHtml(b.text)}</p>`;
+            type ContentBlock = { type?: string; url?: string; text?: string; content?: string; html?: string };
+            const embeddedImageKeys = new Set<string>();
+            const renderedHtml = new Map<number, string>();
+
+            (blocks as ContentBlock[]).forEach((block, index) => {
+                if (String(block.type || "").toLowerCase() === "html") {
+                    renderedHtml.set(index, renderHtmlBlock(block.html || block.text || block.content || "", embeddedImageKeys));
+                }
+            });
+
+            return (blocks as ContentBlock[]).map((b, index) => {
+                const type = String(b.type || "").toLowerCase();
+                const url = b.url || (typeof b.content === "string" && /^https?:\/\//i.test(b.content) ? b.content : "");
+                if (["img", "image", "picture", "pic"].includes(type) && url) {
+                    return embeddedImageKeys.has(imageKey(url)) ? "" : `<img src="${escHtml(url)}" alt="帖子图片" loading="lazy" />`;
+                }
+                if (["text", "txt"].includes(type) && (b.text || b.content)) return `<p>${escHtml(b.text || b.content)}</p>`;
+                if (type === "html") return renderedHtml.get(index) || "";
                 return "";
             }).join("");
         }
