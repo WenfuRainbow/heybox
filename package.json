@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "publisher": "kyo",
   "icon": "resources/icon.png",
   "engines": {
@@ -122,6 +122,11 @@
         "category": "HeyBox"
       },
       {
+        "command": "heybox.switchToMessages",
+        "title": "切换到消息中心",
+        "category": "HeyBox"
+      },
+      {
         "command": "heybox.loadMoreSearch",
         "title": "加载更多搜索结果",
         "category": "HeyBox"
@@ -129,6 +134,16 @@
       {
         "command": "heybox.loadMoreFeed",
         "title": "加载更多推荐",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.loadMoreFavourites",
+        "title": "加载更多收藏",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.loadMoreMessages",
+        "title": "加载更多消息",
         "category": "HeyBox"
       },
       {

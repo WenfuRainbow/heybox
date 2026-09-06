@@ -154,6 +154,8 @@ export interface SearchItem {
 export interface SearchResult {
     items: SearchItem[];
     bottom_tips: string;
+    /** 原始响应条目数；网页搜索会混入分隔符和筛选项，不能只用帖子数判断是否还有下一页。 */
+    raw_item_count?: number;
 }
 
 /**
@@ -194,19 +196,80 @@ export interface MessageLink {
 /** 单条消息通知 */
 export interface MessageItem {
     message_id: string;
-    message_type: string;
-    text: string;
-    create_at: number;
-    user_a: MessageUser;
+    message_type?: string | number;
+    text?: string;
+    create_at?: number;
+    timestamp?: number;
+    user_a?: MessageUser;
+    user_as?: MessageUser[];
     link?: MessageLink;
     link_id?: string;
     linkid?: string;
     link_title?: string;
     /** 被引用的评论内容 */
     comment_a_text?: string;
+    /** 服务端会按消息类别选择性返回以下已读字段。 */
+    is_read?: string | number | boolean;
+    has_read?: string | number | boolean;
+    is_unread?: string | number | boolean;
+    unread?: string | number | boolean;
+    read_status?: string | number | boolean;
 }
 
 /** 消息列表接口返回值 */
 export interface MessageListResult {
     messages: MessageItem[];
+}
+
+/** 网页端“我的收藏”接口返回的收藏链接包装。 */
+export interface FavouriteLinkItem {
+    link?: SearchItemInfo;
+    is_deleted?: string | number;
+}
+
+export interface FavouriteLinksResult {
+    links?: FavouriteLinkItem[];
+    has_next?: string | number | boolean;
+}
+
+/** 官方消息支持富文本标题、跳转协议和缩略图，字段会随消息类别变化。 */
+export interface OfficialMessageItem {
+    message_id?: string;
+    timestamp?: number;
+    title?: string;
+    text?: string;
+    sender_name?: string;
+    sender_avatar?: string;
+    thumb?: string;
+    protocol?: string;
+    is_read?: string | number | boolean;
+    has_read?: string | number | boolean;
+    is_unread?: string | number | boolean;
+    unread?: string | number | boolean;
+    read_status?: string | number | boolean;
+}
+
+export interface OfficialMessageResult {
+    messages?: OfficialMessageItem[];
+    lastval?: string | number;
+    entry_info?: { name?: string };
+}
+
+/** 游戏优惠通知中的一条聚合消息。 */
+export interface DiscountMessageItem {
+    timestamp?: number;
+    datetime?: string;
+    description?: string;
+    max_discount?: string;
+    game_list?: Array<{ steam_appid?: string | number; name?: string; game_type?: string }>;
+    is_read?: string | number | boolean;
+    has_read?: string | number | boolean;
+    is_unread?: string | number | boolean;
+    unread?: string | number | boolean;
+    read_status?: string | number | boolean;
+}
+
+export interface DiscountMessageResult {
+    msg_list?: DiscountMessageItem[];
+    last_timestamp?: string | number;
 }

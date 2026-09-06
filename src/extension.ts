@@ -30,6 +30,45 @@ let pollTimer: ReturnType<typeof setInterval> | undefined;
 /** 已读消息 ID 集合，用于去重 */
 let lastSeenIds = new Set<string>();
 
+/** 轮询时统一处理的只读通知条目。 */
+interface PolledNotification {
+    id: string;
+    title: string;
+    detail: string;
+    linkId?: string;
+    timestamp?: number;
+    readState: "unread" | "read" | "unknown";
+}
+
+type ReadStateValue = string | number | boolean | undefined;
+
+/**
+ * 将不同消息接口的已读字段归一化。缺少字段时返回 false：
+ * 不能把“插件第一次看到”误当成“服务端未读”。
+ */
+function getReadState(message: {
+    is_read?: ReadStateValue;
+    has_read?: ReadStateValue;
+    is_unread?: ReadStateValue;
+    unread?: ReadStateValue;
+    read_status?: ReadStateValue;
+}): "unread" | "read" | "unknown" {
+    const normalized = (value: ReadStateValue): string => String(value ?? "").trim().toLowerCase();
+    const isTrue = (value: ReadStateValue) => ["1", "true", "yes", "unread"].includes(normalized(value));
+    const isFalse = (value: ReadStateValue) => ["0", "false", "no", "unread"].includes(normalized(value));
+    if (message.is_unread !== undefined) return isTrue(message.is_unread) ? "unread" : "read";
+    if (message.unread !== undefined) return isTrue(message.unread) ? "unread" : "read";
+    if (message.is_read !== undefined) return isFalse(message.is_read) ? "unread" : "read";
+    if (message.has_read !== undefined) return isFalse(message.has_read) ? "unread" : "read";
+    if (message.read_status !== undefined) return isFalse(message.read_status) ? "unread" : "read";
+    return "unknown";
+}
+
+function notificationTimestamp(value: number | undefined): number | undefined {
+    if (!value || !Number.isFinite(value)) return undefined;
+    return value < 10_000_000_000 ? value * 1000 : value;
+}
+
 /**
  * 扩展激活入口 — 当用户首次使用或打开工作区时由 VSCode 调用
  *
@@ -98,6 +137,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // 切换到收藏视图
     context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToFavorites", () => postListProvider!.switchTo("favorites")));
 
+    // 切换到消息中心
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToMessages", () => postListProvider!.switchTo("messages")));
+
     // 加载更多搜索结果
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreSearch", async () => postListProvider!.loadMoreSearch()));
 
@@ -106,6 +148,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 加载更多 Feed
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFeed", async () => postListProvider!.loadMoreFeed()));
+
+    // 加载更多云端收藏或某一类消息
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFavourites", async () => postListProvider!.loadMoreFavourites()));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreMessages", async (section: "comment" | "award" | "follow" | "mention" | "official" | "discount") => postListProvider!.loadMoreMessages(section)));
 
     // 开启/关闭消息提醒 — 切换轮询状态
     context.subscriptions.push(vscode.commands.registerCommand("heybox.toggleNotifications", async () => {
@@ -120,12 +166,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
     }));
 
-    // 标记所有消息为已读，清空已读集合
+    // 已读状态由服务端维护；未知写入接口时不再伪造本地“已读”，避免下一轮把未读消息重新弹出。
     context.subscriptions.push(vscode.commands.registerCommand("heybox.markAllRead", async () => {
-        lastSeenIds = new Set<string>();
-        context.globalState.update("heybox.seenMsgIds", []);
-        updateStatusBar(statusBarItem, 0, pollTimer !== undefined);
-        vscode.window.showInformationMessage("已标记所有消息为已读");
+        vscode.window.showInformationMessage("已读状态以小黑盒服务端为准，请在小黑盒客户端中标记已读。");
     }));
 
     // 已登录时自动启动消息轮询
@@ -167,6 +210,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         try {
             await client.favouritePost(linkId);
             vscode.window.showInformationMessage(wasFav ? "已取消收藏（服务端已同步）" : "已收藏（服务端已同步）");
+            await postListProvider!.refreshFavourites();
         } catch {
             toggleFav(context, post); // 回滚
             vscode.window.showErrorMessage("收藏失败，请检查网络后重试");
@@ -482,52 +526,100 @@ function updateStatusBar(item: vscode.StatusBarItem, unread: number, active: boo
 function startPolling(client: HeyBoxClient, statusBarItem: vscode.StatusBarItem, context: vscode.ExtensionContext) {
     // 从全局状态恢复已读消息 ID
     lastSeenIds = new Set(context.globalState.get<string[]>("heybox.seenMsgIds", []));
+    // 若接口没有提供已读字段，首次启用只以此刻作为分界，旧历史绝不触发通知。
+    if (!context.globalState.get<number>("heybox.notificationBaselineAt")) {
+        void context.globalState.update("heybox.notificationBaselineAt", Date.now());
+    }
     checkMessages(client, statusBarItem, context);
     pollTimer = setInterval(() => checkMessages(client, statusBarItem, context), 3 * 60 * 1000);
 }
 
 /**
- * 检查新消息 — 获取回复和点赞，弹窗通知新消息
+ * 检查新消息 — 覆盖互动、官方及游戏优惠；只读取各列表首屏，避免高频请求。
  */
 async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusBarItem, context: vscode.ExtensionContext) {
     try {
-        // 并发获取回复消息（type=0）和点赞消息（type=1）
-        const replies = await client.getMessages(0, 0, 10);
-        const likes = await client.getMessages(1, 0, 10);
-
-        // 合并并过滤出未读消息
-        const all = [...(replies.messages || []), ...(likes.messages || [])];
-        const newMsgs = all.filter(m => !lastSeenIds.has(m.message_id));
+        const responses = await Promise.allSettled([
+            client.getInteractionMessages("comment", 0, 10),
+            client.getInteractionMessages("award", 0, 10),
+            client.getInteractionMessages("follow", 0, 10),
+            client.getInteractionMessages("mention", 0, 10),
+            client.getOfficialMessages(0, 10),
+            client.getDiscountMessages(0),
+        ]);
+        const valueAt = <T>(index: number): T | undefined => {
+            const response = responses[index];
+            if (response.status === "fulfilled") return response.value as T;
+            console.warn("HeyBox notification request failed", response.reason);
+            return undefined;
+        };
+        const comments = valueAt<import("./types").MessageListResult>(0);
+        const awards = valueAt<import("./types").MessageListResult>(1);
+        const follows = valueAt<import("./types").MessageListResult>(2);
+        const mentions = valueAt<import("./types").MessageListResult>(3);
+        const official = valueAt<import("./types").OfficialMessageResult>(4);
+        const discounts = valueAt<import("./types").DiscountMessageResult>(5);
+        const interactions: PolledNotification[] = [
+            ...(comments?.messages || []), ...(awards?.messages || []), ...(follows?.messages || []), ...(mentions?.messages || []),
+        ].map((message, index) => {
+            const user = message.user_a?.nickname || message.user_a?.username || "小黑盒用户";
+            const detail = String(message.text || message.comment_a_text || "新消息").replace(/\s+/g, " ").trim();
+            return {
+                id: String(message.message_id || `interaction-${index}-${message.timestamp || message.create_at || ""}-${detail}`),
+                title: user,
+                detail,
+                linkId: String(message.link?.linkid || message.link_id || message.linkid || "") || undefined,
+                timestamp: notificationTimestamp(Number(message.timestamp || message.create_at || 0)),
+                readState: getReadState(message),
+            };
+        });
+        const all: PolledNotification[] = [
+            ...interactions,
+            ...(official?.messages || []).map((message, index) => ({
+                id: String(message.message_id || `official-${index}-${message.timestamp || ""}-${message.title || message.text || ""}`),
+                title: message.sender_name || "小黑盒官方",
+                detail: String(message.title || message.text || "官方消息").replace(/\s+/g, " ").trim(),
+                timestamp: notificationTimestamp(Number(message.timestamp || 0)),
+                readState: getReadState(message),
+            })),
+            ...(discounts?.msg_list || []).map((message, index) => ({
+                id: `discount-${index}-${message.timestamp || ""}-${message.datetime || ""}-${message.description || ""}`,
+                title: "游戏优惠",
+                detail: String(message.description || message.game_list?.map((game) => game.name).filter(Boolean).join("、") || "已关注游戏有新的优惠").replace(/\s+/g, " ").trim(),
+                timestamp: notificationTimestamp(Number(message.timestamp || 0)),
+                readState: getReadState(message),
+            })),
+        ];
+        const baselineAt = context.globalState.get<number>("heybox.notificationBaselineAt", Date.now());
+        const unread = all.filter((message) =>
+            message.readState === "unread" || (message.readState === "unknown" && !!message.timestamp && message.timestamp > baselineAt),
+        );
+        const newMsgs = unread.filter((message) => !lastSeenIds.has(message.id));
 
         if (newMsgs.length > 0) {
-            updateStatusBar(statusBarItem, newMsgs.length, true);
+            updateStatusBar(statusBarItem, unread.length, true);
 
             // 逐条弹窗通知新消息
             for (const msg of newMsgs) {
-                const linkId = msg.link?.linkid || msg.link_id || msg.linkid;
-                const user = msg.user_a?.nickname || msg.user_a?.username || "未知用户";
-                const desc = msg.text || msg.comment_a_text || "新消息";
-                const shortDesc = desc.length > 50 ? desc.substring(0, 50) + "..." : desc;
-
-                const action = await vscode.window.showInformationMessage(
-                    `${user}: ${shortDesc}`,
-                    "查看帖子"
-                );
-                if (action === "查看帖子" && linkId) {
-                    await vscode.commands.executeCommand("heybox.openPost", { linkid: Number(linkId) });
+                const shortDesc = msg.detail.length > 50 ? msg.detail.substring(0, 50) + "..." : msg.detail;
+                if (msg.linkId) {
+                    const action = await vscode.window.showInformationMessage(`${msg.title}: ${shortDesc}`, "查看帖子");
+                    if (action === "查看帖子") {
+                        await vscode.commands.executeCommand("heybox.openPost", { linkid: Number(msg.linkId) });
+                    }
+                } else {
+                    vscode.window.showInformationMessage(`${msg.title}: ${shortDesc}`);
                 }
 
                 // 标记为已读
-                lastSeenIds.add(msg.message_id);
+                lastSeenIds.add(msg.id);
             }
 
-            // 持久化已读 ID，最多保留 200 条防止无限增长
-            const seenArr = Array.from(lastSeenIds).slice(-200);
+            // 持久化已读 ID，最多保留 400 条防止无限增长。
+            const seenArr = Array.from(lastSeenIds).slice(-400);
             lastSeenIds = new Set(seenArr);
             context.globalState.update("heybox.seenMsgIds", seenArr);
-        } else {
-            updateStatusBar(statusBarItem, 0, true);
-        }
+        } else updateStatusBar(statusBarItem, unread.length, true);
     } catch (e) {
         const msg = (e as Error).message || "";
         // Cookie 失效时停止轮询

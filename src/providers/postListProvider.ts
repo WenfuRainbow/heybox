@@ -1,9 +1,26 @@
 import * as vscode from "vscode";
 import { HeyBoxClient } from "../api/client";
-import { SearchItemInfo, TopicChild } from "../types";
+import { DiscountMessageItem, MessageItem, OfficialMessageItem, SearchItemInfo, TopicChild } from "../types";
 
-/** 视图模式：推荐流 / 板块分类 / 收藏夹 */
-type ViewMode = "recommend" | "categories" | "favorites";
+/** 视图模式：推荐流 / 板块分类 / 云端收藏 / 消息中心 */
+type ViewMode = "recommend" | "categories" | "favorites" | "messages";
+type MessageSection = "comment" | "award" | "follow" | "mention" | "official" | "discount";
+
+interface MessageEntry {
+    id: string;
+    title: string;
+    detail: string;
+    timestamp?: number;
+    linkId?: string;
+}
+
+interface MessagePageState {
+    entries: MessageEntry[];
+    offset: number;
+    cursor: string;
+    hasMore: boolean;
+    loading: boolean;
+}
 
 const FAV_KEY = "heybox.favorites";          // 全局状态中收藏夹的存储键
 const EXPANDED_KEY = "heybox.expandedTopics"; // 已展开话题的持久化键
@@ -36,7 +53,7 @@ export { getFavs };
 
 /**
  * 帖子列表的 TreeView 数据提供者
- * 支持三种视图模式（推荐/板块/收藏）以及搜索模式，
+ * 支持推荐、板块、云端收藏、消息中心以及搜索模式，
  * 负责懒加载帖子数据并驱动侧边栏树的刷新。
  */
 export class PostListProvider
@@ -72,8 +89,10 @@ export class PostListProvider
     private searchResults: SearchItemInfo[] = [];
     /** 当前搜索关键词 */
     private searchQuery: string = "";
-    /** 搜索的当前页码（从 1 开始） */
-    private searchPage: number = 0;
+    /** 搜索的当前偏移量；与网页版 /search/v1 的 offset 参数一致。 */
+    private searchOffset: number = 0;
+    /** 搜索接口是否仍有下一页。 */
+    private searchHasMore: boolean = true;
     /** 搜索是否正在加载中 */
     private searchLoading: boolean = false;
 
@@ -86,6 +105,16 @@ export class PostListProvider
 
     /** 帖子收藏数缓存，key = linkid, value = favour_count */
     private favCache: Map<number, number> = new Map();
+
+    /** 服务端默认收藏夹，首次进入收藏页时按需读取。 */
+    private favouritePosts: SearchItemInfo[] = [];
+    private favouriteOffset = 0;
+    private favouritesLoaded = false;
+    private favouritesHasMore = true;
+    private favouritesLoading = false;
+
+    /** 消息中心的六个分页流，避免切换分类时重复请求。 */
+    private readonly messagePages = new Map<MessageSection, MessagePageState>();
 
     private ctx?: vscode.ExtensionContext;
     private treeView?: vscode.TreeView<TreeItemBase>;
@@ -129,6 +158,11 @@ export class PostListProvider
         this.feedPosts = [];
         this.feedOffset = 0;
         this.favCache.clear();
+        this.favouritePosts = [];
+        this.favouriteOffset = 0;
+        this.favouritesLoaded = false;
+        this.favouritesHasMore = true;
+        this.messagePages.clear();
         this._onDidChangeTreeData.fire();
     }
 
@@ -139,7 +173,8 @@ export class PostListProvider
         this.searchMode = false;
         this.searchResults = [];
         this.searchQuery = "";
-        this.searchPage = 0;
+        this.searchOffset = 0;
+        this.searchHasMore = true;
     }
 
     /** 切换视图模式并刷新树 */
@@ -157,7 +192,8 @@ export class PostListProvider
         if (!query || this.searchLoading) return;
         this.searchQuery = query;
         this.searchMode = true;
-        this.searchPage = 0;
+        this.searchOffset = 0;
+        this.searchHasMore = true;
         this.searchResults = [];
         await this.loadMoreSearchResults();
         this._onDidChangeTreeData.fire();
@@ -166,16 +202,30 @@ export class PostListProvider
     /** 加载下一页搜索结果，受 MAX_SEARCH_RESULTS 上限约束 */
     async loadMoreSearchResults(): Promise<void> {
         if (this.searchLoading) return;
+        if (!this.searchHasMore) return;
         if (this.searchResults.length >= MAX_SEARCH_RESULTS) return;
         this.searchLoading = true;
         try {
-            this.searchPage++;
-            const result = await this.client.searchPosts(this.searchQuery, this.searchPage, 20);
+            const pageSize = 30;
+            const result = await this.client.searchPosts(this.searchQuery, this.searchOffset, pageSize);
             const newPosts = (result.items || []).map((item) => item.info).filter((info) => info && info.linkid);
-            this.searchResults = this.searchResults.concat(newPosts);
+            // API 有时会把同一 linkid 以 number / string 两种形式返回；同时同一页本身也可能重复。
+            // 使用字符串主键并在筛选过程中立即登记，确保跨页和页内都只保留一条。
+            const known = new Set(this.searchResults.map((post) => String(post.linkid)));
+            const added = newPosts.filter((post) => {
+                const key = String(post.linkid);
+                if (known.has(key)) return false;
+                known.add(key);
+                return true;
+            });
+            this.searchResults = this.searchResults.concat(added);
+            this.searchOffset += pageSize;
+            // 防御服务端游标异常：只要整页没有新帖子，就不再显示加载更多入口。
+            this.searchHasMore = (result.raw_item_count ?? newPosts.length) > 0 && added.length > 0;
             // 截断到上限
             if (this.searchResults.length > MAX_SEARCH_RESULTS) {
                 this.searchResults = this.searchResults.slice(0, MAX_SEARCH_RESULTS);
+                this.searchHasMore = false;
             }
         } catch (e) {
             vscode.window.showErrorMessage(`搜索失败: ${(e as Error).message}`);
@@ -187,7 +237,7 @@ export class PostListProvider
     /**
      * 核心方法：根据当前状态返回树节点的子元素
      * - 搜索模式下委托给 getSearchChildren
-     * - 根节点：根据 viewMode 返回三个 Tab + 对应内容
+     * - 根节点：根据 viewMode 返回四个 Tab + 对应内容
      * - 板块节点：懒加载该板块下的帖子列表
      */
     async getChildren(element?: TreeItemBase): Promise<TreeItemBase[]> {
@@ -197,18 +247,22 @@ export class PostListProvider
                 new TabItem("recommend", this.viewMode === "recommend"),
                 new TabItem("categories", this.viewMode === "categories"),
                 new TabItem("favorites", this.viewMode === "favorites"),
+                new TabItem("messages", this.viewMode === "messages"),
             ];
             if (this.viewMode === "recommend") {
                 if (this.feedPosts.length === 0 && !this.feedLoading) await this.fetchFeed();
                 tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
                 tabs.push(new LoadMoreFeedItem());
             } else if (this.viewMode === "favorites") {
-                const favs = getFavs(this.client.getContext());
-                if (favs.length === 0) {
-                    tabs.push(new TabEmptyItem("暂无收藏，右键帖子可以收藏"));
+                if (!this.favouritesLoaded && !this.favouritesLoading) await this.fetchFavourites();
+                if (this.favouritePosts.length === 0) {
+                    tabs.push(new TabEmptyItem("暂无云端收藏"));
                 } else {
-                    tabs.push(...favs.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
+                    tabs.push(...this.favouritePosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
+                    if (this.favouritesHasMore) tabs.push(new LoadMoreFavouritesItem());
                 }
+            } else if (this.viewMode === "messages") {
+                tabs.push(...MESSAGE_SECTIONS.map((section) => new MessageSectionItem(section)));
             } else {
                 if (this.topics.length === 0) await this.fetchTopics();
                 tabs.push(...this.topics.map((t) => new TopicItem(t,
@@ -225,6 +279,19 @@ export class PostListProvider
             items.push(new LoadMoreTopicItem(tid));
             return items;
         }
+        if (element instanceof MessageSectionItem) {
+            const state = this.messagePages.get(element.section);
+            if (!state || (!state.loading && state.entries.length === 0 && state.hasMore)) {
+                await this.fetchMessagePage(element.section);
+            }
+            const current = this.messagePages.get(element.section);
+            if (!current || current.entries.length === 0) {
+                return [new TabEmptyItem("暂无消息")];
+            }
+            const items: TreeItemBase[] = current.entries.map((entry) => new MessageEntryItem(entry));
+            if (current.hasMore) items.push(new LoadMoreMessagesItem(element.section));
+            return items;
+        }
         return [];
     }
 
@@ -236,7 +303,7 @@ export class PostListProvider
                 this.loadMoreSearchResults();
             }
             items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
-            if (this.searchResults.length > 0) items.push(new LoadMoreSearchItem());
+            if (this.searchResults.length > 0 && this.searchHasMore) items.push(new LoadMoreSearchItem());
             return items;
         }
         return [];
@@ -282,6 +349,117 @@ export class PostListProvider
         this.fetchFavCounts(this.topicPosts.get(topicId) || []);
     }
 
+    /** 分页读取云端默认收藏夹；网络失败时保留旧版本地缓存作为离线兜底。 */
+    private async fetchFavourites(): Promise<void> {
+        if (this.favouritesLoading || !this.favouritesHasMore) return;
+        this.favouritesLoading = true;
+        try {
+            const page = await this.client.getFavouriteLinks(this.favouriteOffset, 30);
+            const known = new Set(this.favouritePosts.map((post) => post.linkid));
+            const added = page.links.filter((post) => !known.has(post.linkid));
+            this.favouritePosts.push(...added);
+            this.favouriteOffset += page.links.length;
+            this.favouritesHasMore = page.hasMore && added.length > 0;
+            this.favouritesLoaded = true;
+            this.fetchFavCounts(added);
+        } catch (e) {
+            if (!this.favouritesLoaded) {
+                this.favouritePosts = getFavs(this.client.getContext());
+                this.favouritesHasMore = false;
+                this.favouritesLoaded = true;
+            }
+            vscode.window.showErrorMessage(`获取云端收藏失败: ${(e as Error).message}`);
+        } finally {
+            this.favouritesLoading = false;
+        }
+    }
+
+    private async fetchMessagePage(section: MessageSection): Promise<void> {
+        const state = this.messagePages.get(section) || {
+            entries: [], offset: 0, cursor: "", hasMore: true, loading: false,
+        };
+        if (state.loading || !state.hasMore) return;
+        state.loading = true;
+        this.messagePages.set(section, state);
+        try {
+            let entries: MessageEntry[] = [];
+            let cursor = state.cursor;
+            if (section === "official") {
+                const result = await this.client.getOfficialMessages(state.offset, 20, state.cursor);
+                const messages = result.messages || [];
+                entries = messages.map((message, index) => this.toOfficialEntry(message, index));
+                cursor = String(result.lastval ?? messages.at(-1)?.timestamp ?? "");
+            } else if (section === "discount") {
+                const result = await this.client.getDiscountMessages(state.offset, state.cursor);
+                const messages = result.msg_list || [];
+                entries = messages.map((message, index) => this.toDiscountEntry(message, index));
+                cursor = String(result.last_timestamp ?? "");
+            } else {
+                const result = await this.client.getInteractionMessages(section, state.offset, 20);
+                entries = (result.messages || []).map((message, index) => this.toInteractionEntry(section, message, index));
+            }
+            const known = new Set(state.entries.map((entry) => entry.id));
+            const added = entries.filter((entry) => !known.has(entry.id));
+            state.entries.push(...added);
+            state.offset += entries.length;
+            state.cursor = cursor;
+            state.hasMore = entries.length === 20 && added.length > 0;
+        } catch (e) {
+            vscode.window.showErrorMessage(`获取${MESSAGE_SECTION_LABELS[section]}失败: ${(e as Error).message}`);
+            state.hasMore = false;
+        } finally {
+            state.loading = false;
+            this.messagePages.set(section, state);
+            this._onDidChangeTreeData.fire();
+        }
+    }
+
+    private toInteractionEntry(section: MessageSection, message: MessageItem, index: number): MessageEntry {
+        const user = message.user_as?.length
+            ? `${message.user_as.map((item) => item.nickname || item.username).filter(Boolean).join("、")}等`
+            : message.user_a?.nickname || message.user_a?.username || "小黑盒用户";
+        const text = String(message.text || message.comment_a_text || "新消息").replace(/\s+/g, " ").trim();
+        const linkId = String(message.link?.linkid || message.link_id || message.linkid || "");
+        const stamp = Number(message.timestamp || message.create_at || 0) || undefined;
+        return {
+            id: String(message.message_id || `${section}-${stamp || ""}-${index}-${text}`),
+            title: `${user}: ${text || MESSAGE_SECTION_LABELS[section]}`,
+            detail: this.formatTime(stamp),
+            timestamp: stamp,
+            linkId: linkId || undefined,
+        };
+    }
+
+    private toOfficialEntry(message: OfficialMessageItem, index: number): MessageEntry {
+        const stamp = Number(message.timestamp || 0) || undefined;
+        const title = String(message.title || message.text || "官方消息").replace(/\s+/g, " ").trim();
+        const sender = String(message.sender_name || "小黑盒官方");
+        return {
+            id: String(message.message_id || `official-${stamp || ""}-${index}-${title}`),
+            title: `${sender}: ${title}`,
+            detail: this.formatTime(stamp),
+            timestamp: stamp,
+        };
+    }
+
+    private toDiscountEntry(message: DiscountMessageItem, index: number): MessageEntry {
+        const stamp = Number(message.timestamp || 0) || undefined;
+        const games = (message.game_list || []).map((game) => game.name).filter(Boolean).join("、");
+        const summary = String(message.description || games || "游戏优惠").replace(/\s+/g, " ").trim();
+        return {
+            id: `discount-${stamp || ""}-${index}-${summary}`,
+            title: summary,
+            detail: message.datetime || this.formatTime(stamp),
+            timestamp: stamp,
+        };
+    }
+
+    private formatTime(timestamp?: number): string {
+        if (!timestamp) return "";
+        const milliseconds = timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp;
+        return new Date(milliseconds).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+    }
+
     /** 使用列表接口已有的收藏数，避免为列表展示额外请求帖子详情接口。 */
     private async fetchFavCounts(posts: SearchItemInfo[]): Promise<void> {
         for (const post of posts) {
@@ -309,6 +487,28 @@ export class PostListProvider
         await this.fetchFeed();
         this._onDidChangeTreeData.fire();
     }
+
+    /** 加载更多云端收藏。 */
+    async loadMoreFavourites(): Promise<void> {
+        await this.fetchFavourites();
+        this._onDidChangeTreeData.fire();
+    }
+
+    /** 加载指定消息分类的下一页。 */
+    async loadMoreMessages(section: MessageSection): Promise<void> {
+        await this.fetchMessagePage(section);
+        this._onDidChangeTreeData.fire();
+    }
+
+    /** 收藏操作完成后丢弃服务端缓存并重新读取。 */
+    async refreshFavourites(): Promise<void> {
+        this.favouritePosts = [];
+        this.favouriteOffset = 0;
+        this.favouritesLoaded = false;
+        this.favouritesHasMore = true;
+        if (this.viewMode === "favorites") await this.fetchFavourites();
+        this._onDidChangeTreeData.fire();
+    }
 }
 
 /** 所有树节点的基类 */
@@ -334,22 +534,23 @@ export class SearchHeaderItem extends TreeItemBase {
     }
 }
 
-/** 视图模式切换 Tab（推荐/板块/收藏），激活态显示不同图标和标记 */
+/** 视图模式切换 Tab，激活态显示不同图标和标记。 */
 export class TabItem extends TreeItemBase {
     constructor(mode: ViewMode, active: boolean) {
         const labels: Record<ViewMode, [string, string]> = {
             recommend: ["📌 推荐", "推荐"],
             categories: ["📁 板块", "板块"],
             favorites: ["⭐ 收藏", "收藏"],
+            messages: ["🔔 消息", "消息"],
         };
         const [activeLabel, inactiveLabel] = labels[mode];
         super(active ? activeLabel : inactiveLabel, vscode.TreeItemCollapsibleState.None);
         if (active) {
-            this.iconPath = new vscode.ThemeIcon(mode === "favorites" ? "star" : mode === "recommend" ? "flame" : "folder-active");
+            this.iconPath = new vscode.ThemeIcon(mode === "favorites" ? "star" : mode === "messages" ? "bell" : mode === "recommend" ? "flame" : "folder-active");
             this.description = "● 当前";
         } else {
-            this.iconPath = new vscode.ThemeIcon(mode === "favorites" ? "star-empty" : mode === "recommend" ? "flame" : "folder");
-            const cmds: Record<ViewMode, string> = { recommend: "heybox.switchToRecommend", categories: "heybox.switchToCategories", favorites: "heybox.switchToFavorites" };
+            this.iconPath = new vscode.ThemeIcon(mode === "favorites" ? "star-empty" : mode === "messages" ? "bell" : mode === "recommend" ? "flame" : "folder");
+            const cmds: Record<ViewMode, string> = { recommend: "heybox.switchToRecommend", categories: "heybox.switchToCategories", favorites: "heybox.switchToFavorites", messages: "heybox.switchToMessages" };
             this.command = { command: cmds[mode], title: "切换" };
         }
         this.contextValue = "tab";
@@ -419,6 +620,64 @@ export class LoadMoreFeedItem extends TreeItemBase {
         super("加载更多推荐...", vscode.TreeItemCollapsibleState.None);
         this.command = { command: "heybox.loadMoreFeed", title: "加载更多推荐" };
         this.contextValue = "loadMoreFeed";
+        this.iconPath = new vscode.ThemeIcon("more-horizontal");
+    }
+}
+
+/** 收藏页的分页入口。 */
+export class LoadMoreFavouritesItem extends TreeItemBase {
+    constructor() {
+        super("加载更多收藏...", vscode.TreeItemCollapsibleState.None);
+        this.command = { command: "heybox.loadMoreFavourites", title: "加载更多收藏" };
+        this.contextValue = "loadMoreFavourites";
+        this.iconPath = new vscode.ThemeIcon("more-horizontal");
+    }
+}
+
+const MESSAGE_SECTIONS: MessageSection[] = ["comment", "award", "follow", "mention", "official", "discount"];
+const MESSAGE_SECTION_LABELS: Record<MessageSection, string> = {
+    comment: "评论与回复",
+    award: "获赞",
+    follow: "关注",
+    mention: "@我",
+    official: "官方消息",
+    discount: "游戏优惠",
+};
+
+/** 消息中心中可按需展开的一类消息。 */
+export class MessageSectionItem extends TreeItemBase {
+    constructor(public readonly section: MessageSection) {
+        super(MESSAGE_SECTION_LABELS[section], vscode.TreeItemCollapsibleState.Collapsed);
+        this.description = section === "discount" ? "已关注游戏" : "";
+        this.contextValue = "messageSection";
+        this.iconPath = new vscode.ThemeIcon(section === "official" ? "megaphone" : section === "discount" ? "tag" : "bell");
+    }
+}
+
+/** 单条只读消息；互动消息可直接跳转关联帖子。 */
+export class MessageEntryItem extends TreeItemBase {
+    constructor(entry: MessageEntry) {
+        super(entry.title, vscode.TreeItemCollapsibleState.None);
+        this.description = entry.detail;
+        this.tooltip = entry.detail ? `${entry.title}\n${entry.detail}` : entry.title;
+        this.contextValue = "message";
+        this.iconPath = new vscode.ThemeIcon("mail");
+        if (entry.linkId) {
+            this.command = {
+                command: "heybox.openPost",
+                title: "打开关联帖子",
+                arguments: [{ linkid: Number(entry.linkId) }],
+            };
+        }
+    }
+}
+
+/** 消息分类的分页入口。 */
+export class LoadMoreMessagesItem extends TreeItemBase {
+    constructor(section: MessageSection) {
+        super("加载更多消息...", vscode.TreeItemCollapsibleState.None);
+        this.command = { command: "heybox.loadMoreMessages", title: "加载更多消息", arguments: [section] };
+        this.contextValue = "loadMoreMessages";
         this.iconPath = new vscode.ThemeIcon("more-horizontal");
     }
 }

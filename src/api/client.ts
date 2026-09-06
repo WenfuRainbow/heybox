@@ -1,14 +1,14 @@
 /**
  * HeyBox API 客户端模块
- * 封装了与小黑盒 API 的所有交互，包括用户认证、帖子操作、签到等功能
+ * 封装了与小黑盒 API 的所有交互，包括用户认证和帖子操作等功能
  */
 
 import * as vscode from "vscode";
 import * as https from "https";
 import { generateSignature, Signature } from "./signature";
 import {
-    ApiResponse, PostTreeResult, SearchResult, TopicCategoryResult, SearchItemInfo,
-    MessageListResult,
+    ApiResponse, PostTreeResult, SearchResult, SearchItem, TopicCategoryResult, SearchItemInfo,
+    MessageListResult, FavouriteLinksResult, OfficialMessageResult, DiscountMessageResult,
 } from "../types";
 
 const API_BASE = "https://api.xiaoheihe.cn";
@@ -298,12 +298,34 @@ export class HeyBoxClient {
     /**
      * 搜索帖子
      * @param query 搜索关键词
-     * @param page 页码，默认 1
+     * @param offset 偏移量，网页端每页递增 30
      * @param limit 每页数量，默认 20
      * @returns 搜索结果
      */
-    async searchPosts(query: string, page: number = 1, limit: number = 20): Promise<SearchResult> {
-        return this.get<SearchResult>("/bbs/app/api/general/search/v1/web", { q: query, search_type: "link", page: String(page), limit: String(limit) });
+    async searchPosts(query: string, offset: number = 0, limit: number = 30): Promise<SearchResult> {
+        // 当前网页版使用 /v1 + offset 分页；旧 /v1/web 的 page 参数会在后续页重复返回首屏结果。
+        const result = await this.get<{ items?: Array<SearchItem | { type?: string; info?: SearchItemInfo }>; bottom_tips?: string }>(
+            "/bbs/app/api/general/search/v1",
+            {
+                q: query,
+                search_type: "link",
+                is_pull_down: "0",
+                offset: String(offset),
+                limit: String(limit),
+                dw: "800",
+            },
+        );
+        const rawItems = result.items || [];
+        const items = rawItems
+            .filter((item): item is SearchItem | { type?: string; info: SearchItemInfo } =>
+                !!item?.info && (!("type" in item) || !item.type || item.type === "link"),
+            )
+            .map((item) => ({ info: item.info }));
+        return {
+            items,
+            bottom_tips: result.bottom_tips || "",
+            raw_item_count: rawItems.length,
+        };
     }
 
     /**
@@ -375,13 +397,7 @@ export class HeyBoxClient {
         await this.post("/bbs/app/link/favour", { link_id: linkId }, { link_id: linkId });
     }
 
-    /**
-     * 获取用户消息列表
-     * @param listType 消息类型，默认 0
-     * @param offset 分页偏移量，默认 0
-     * @param limit 返回数量限制，默认 20
-     * @returns 消息列表数据
-     */
+    /** 获取评论或获赞消息；保留给现有调用方使用。 */
     async getMessages(listType: number = 0, offset: number = 0, limit: number = 20): Promise<MessageListResult> {
         return this.get<MessageListResult>("/bbs/app/user/message", {
             list_type: String(listType),
@@ -389,6 +405,55 @@ export class HeyBoxClient {
             limit: String(limit),
             no_more: "false",
         });
+    }
+
+    /** 获取网页消息中心的一类互动消息（评论、获赞、关注、@我）。 */
+    async getInteractionMessages(
+        kind: "comment" | "award" | "follow" | "mention",
+        offset: number = 0,
+        limit: number = 20,
+    ): Promise<MessageListResult> {
+        const params: Record<string, string> = {
+            offset: String(offset),
+            limit: String(limit),
+            no_more: "false",
+        };
+        if (kind === "comment") params.list_type = "0";
+        else if (kind === "award") params.list_type = "1";
+        else if (kind === "follow") params.message_type = "4";
+        else params.message_type = "16";
+        return this.get<MessageListResult>("/bbs/app/user/message", params);
+    }
+
+    /** 获取服务端默认收藏夹的帖子列表，不依赖本地缓存。 */
+    async getFavouriteLinks(offset: number = 0, limit: number = 30): Promise<{ links: SearchItemInfo[]; hasMore: boolean }> {
+        const result = await this.get<FavouriteLinksResult>("/bbs/app/profile/fav/folder/v2/links", {
+            enable_new_style_collect: "1",
+            dw: "800",
+            offset: String(offset),
+            limit: String(limit),
+        });
+        const links = (result.links || [])
+            .filter((item) => String(item?.is_deleted || "0") !== "1" && item?.link?.linkid)
+            .map((item) => item.link!)
+            .filter((item, index, all) => all.findIndex((candidate) => candidate.linkid === item.linkid) === index);
+        const flag = result.has_next;
+        const hasMore = flag === "1" || flag === 1 || flag === true;
+        return { links, hasMore };
+    }
+
+    /** 获取官方公告、活动及开发者动态；subEntry 缺省时读取官方消息主列表。 */
+    async getOfficialMessages(offset: number = 0, limit: number = 20, lastval: string = "", subEntry?: string): Promise<OfficialMessageResult> {
+        const params: Record<string, string> = { offset: String(offset), limit: String(limit), lastval };
+        if (subEntry) params.sub_entry = subEntry;
+        return this.get<OfficialMessageResult>("/bbs/notify/official_msg_v2/list", params);
+    }
+
+    /** 获取已关注游戏的优惠消息；只读且使用网页端游标分页。 */
+    async getDiscountMessages(offset: number = 0, lastTimestamp: string = ""): Promise<DiscountMessageResult> {
+        const params: Record<string, string> = { message_type: "8", offset: String(offset) };
+        if (lastTimestamp) params.last_timestamp = lastTimestamp;
+        return this.get<DiscountMessageResult>("/bbs/app/user/discount_message_v2", params);
     }
 
     /** 创建二维码登录会话。二维码内容只用于本地渲染，凭证始终留在扩展进程内。 */
