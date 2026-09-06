@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "publisher": "kyo",
   "icon": "resources/icon.png",
   "engines": {
@@ -12,7 +12,30 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:heybox.postList"
+    "onView:heybox.postList",
+    "onCommand:heybox.refreshList",
+    "onCommand:heybox.searchPost",
+    "onCommand:heybox.openPost",
+    "onCommand:heybox.openByUrl",
+    "onCommand:heybox.loadMore",
+    "onCommand:heybox.loadMoreSearch",
+    "onCommand:heybox.loadMoreFeed",
+    "onCommand:heybox.loadMoreFavourites",
+    "onCommand:heybox.loadMoreMessages",
+    "onCommand:heybox.switchToRecommend",
+    "onCommand:heybox.switchToCategories",
+    "onCommand:heybox.switchToFavorites",
+    "onCommand:heybox.switchToMessages",
+    "onCommand:heybox.login",
+    "onCommand:heybox.logout",
+    "onCommand:heybox.toggleFavourite",
+    "onCommand:heybox.toggleNotifications",
+    "onCommand:heybox.markAllRead",
+    "onCommand:heybox.openInBrowser",
+    "onCommand:heybox.toggleSidebar",
+    "onCommand:heybox.openClipboardUrl",
+    "onCommand:heybox.switchTheme",
+    "onWebviewPanel:heybox.postDetail"
   ],
   "main": "./out/extension.js",
   "contributes": {
