@@ -3,3 +3,4 @@ out/
 *.vsix
 .vscode/settings.json
 .mimocode
+.package-staging

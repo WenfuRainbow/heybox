@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "publisher": "kyo",
   "icon": "resources/icon.png",
   "engines": {
@@ -361,6 +361,7 @@
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
+    "package": "npm run compile && npx @vscode/vsce package",
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src --ext ts",
@@ -370,6 +371,7 @@
     "@types/node": "^20.11.0",
     "@types/qrcode": "^1.5.6",
     "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
     "typescript": "^5.3.0"
   },
   "dependencies": {

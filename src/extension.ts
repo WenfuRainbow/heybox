@@ -16,7 +16,6 @@ import { PostListProvider, toggleFav, getFavs } from "./providers/postListProvid
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
 import { SearchItemInfo, PostTreeResult } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
-import { showQrLoginPanel } from "./auth/qrLoginPanel";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
@@ -225,6 +224,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 登录命令 — 默认使用手机扫码，手动 Cookie 仅作为兼容兜底。
     context.subscriptions.push(vscode.commands.registerCommand("heybox.login", async () => {
+        // 扫码功能的 qrcode 依赖只在用户登录时加载。这样即使发行包意外漏掉
+        // 该可选界面依赖，也不会阻止扩展完成激活及注册其它命令。
+        const { showQrLoginPanel } = await import("./auth/qrLoginPanel");
         await showQrLoginPanel(
             context,
             client,
