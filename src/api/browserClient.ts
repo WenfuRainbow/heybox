@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
-import puppeteer, { Browser, BrowserContext, Page } from "puppeteer-core";
+import puppeteer, { Browser, Page } from "puppeteer-core";
 
 const API_BASE = "https://api.xiaoheihe.cn";
 const BOOTSTRAP_PATH = "/bbs/app/topic/categories";
@@ -123,6 +123,21 @@ export function findBrowserExecutablePath(): string | undefined {
     return findBrowserExecutablePaths()[0];
 }
 
+function isTrustedBrowserExecutablePath(value: string): boolean {
+    const allowed = new Set([
+        "msedge.exe",
+        "chrome.exe",
+        "chromium",
+        "chromium-browser",
+        "microsoft-edge",
+        "microsoft-edge-stable",
+        "google-chrome",
+        "microsoft edge",
+        "google chrome",
+    ]);
+    return allowed.has(path.basename(value).toLowerCase());
+}
+
 function launchErrorDetail(error: unknown): string {
     const raw = error instanceof Error ? error.message : String(error);
     const meaningful = raw
@@ -141,11 +156,8 @@ function launchErrorDetail(error: unknown): string {
 export class BrowserNetworkClient {
     private browser?: Browser;
     private authPage?: Page;
-    private anonPage?: Page;
-    private anonContext?: BrowserContext;
     private launchPromise?: Promise<Browser>;
     private lastAuthCookie = "";
-    private lastAnonCookie = "";
     private proxy = "";
     private browserPath = "";
 
@@ -160,9 +172,10 @@ export class BrowserNetworkClient {
 
     async request(options: BrowserRequestOptions): Promise<BrowserHttpResult> {
         const browser = await this.ensureBrowser();
-        const page = options.anonymous ? await this.getAnonPage(browser) : await this.getAuthPage(browser);
+        if (options.anonymous) return this.requestAnonymous(browser, options);
+        const page = await this.getAuthPage(browser);
         const cookieHeader = options.cookie ?? "";
-        await this.syncCookies(page, cookieHeader, Boolean(options.anonymous));
+        await this.syncCookies(page, cookieHeader);
 
         const result = await page.evaluate(fetchInBrowser, {
             method: options.method,
@@ -172,8 +185,30 @@ export class BrowserNetworkClient {
             timeoutMs: REQUEST_TIMEOUT_MS,
         });
 
-        const cookies = options.anonymous ? await cookiesAfterRequest(page) : {};
-        return { ...result, cookies };
+        return { ...result, cookies: {} };
+    }
+
+    private async requestAnonymous(browser: Browser, options: BrowserRequestOptions): Promise<BrowserHttpResult> {
+        const context = await browser.createBrowserContext();
+        const page = await context.newPage();
+        try {
+            await this.loadBootstrap(page);
+            const cookieHeader = options.cookie ?? "";
+            const existing = await context.cookies();
+            if (existing.length > 0) await context.deleteCookie(...existing);
+            if (cookieHeader.trim()) await applyCookies(page, cookieHeader);
+
+            const result = await page.evaluate(fetchInBrowser, {
+                method: options.method,
+                url: options.url,
+                headers: this.pickFetchHeaders(options.headers),
+                body: options.method === "POST" ? options.body : undefined,
+                timeoutMs: REQUEST_TIMEOUT_MS,
+            });
+            return { ...result, cookies: await cookiesAfterRequest(page) };
+        } finally {
+            await context.close().catch(() => undefined);
+        }
     }
 
     async dispose(): Promise<void> {
@@ -182,10 +217,7 @@ export class BrowserNetworkClient {
         this.browser = undefined;
         this.launchPromise = undefined;
         this.authPage = undefined;
-        this.anonPage = undefined;
-        this.anonContext = undefined;
         this.lastAuthCookie = "";
-        this.lastAnonCookie = "";
         if (launchPromise) {
             launchPromise.then((value) => value.close()).catch(() => undefined);
         } else if (browser?.connected) {
@@ -197,9 +229,15 @@ export class BrowserNetworkClient {
         if (this.browser?.connected) return this.browser;
         if (this.launchPromise) return this.launchPromise;
 
-        const candidates = this.browserPath ? [this.browserPath] : findBrowserExecutablePaths();
+        const explicitPath = this.browserPath;
+        const explicitAllowed = explicitPath ? isTrustedBrowserExecutablePath(explicitPath) : false;
+        const candidates = explicitPath
+            ? (explicitAllowed ? [explicitPath] : [])
+            : findBrowserExecutablePaths();
         if (candidates.length === 0) {
-            throw new Error("未找到 Edge/Chrome；请在 heybox.browserPath 中指定浏览器路径");
+            throw new Error(explicitPath
+                ? "heybox.browserPath 仅支持 Edge/Chrome 可执行文件路径"
+                : "未找到 Edge/Chrome；请在 heybox.browserPath 中指定浏览器路径");
         }
 
         const args = [
@@ -230,8 +268,6 @@ export class BrowserNetworkClient {
             if (this.browser === browser) {
                 this.browser = undefined;
                 this.authPage = undefined;
-                this.anonPage = undefined;
-                this.anonContext = undefined;
             }
         });
         return browser;
@@ -264,18 +300,6 @@ export class BrowserNetworkClient {
         return page;
     }
 
-    private async getAnonPage(browser: Browser): Promise<Page> {
-        if (this.anonPage && !this.anonPage.isClosed()) return this.anonPage;
-        await this.anonContext?.close().catch(() => undefined);
-        const context = await browser.createBrowserContext();
-        const page = await context.newPage();
-        await this.loadBootstrap(page);
-        this.anonPage = page;
-        this.anonContext = context;
-        this.lastAnonCookie = "";
-        return page;
-    }
-
     private async loadBootstrap(page: Page): Promise<void> {
         page.setDefaultTimeout(30_000);
         const response = await page.goto(`${API_BASE}${BOOTSTRAP_PATH}`, {
@@ -296,14 +320,12 @@ export class BrowserNetworkClient {
         return result;
     }
 
-    private async syncCookies(page: Page, cookieHeader: string, anonymous: boolean): Promise<void> {
-        const last = anonymous ? this.lastAnonCookie : this.lastAuthCookie;
-        if (last === cookieHeader) return;
+    private async syncCookies(page: Page, cookieHeader: string): Promise<void> {
+        if (this.lastAuthCookie === cookieHeader) return;
         const context = page.browserContext();
         const existing = await context.cookies();
         if (existing.length > 0) await context.deleteCookie(...existing);
         if (cookieHeader.trim()) await applyCookies(page, cookieHeader);
-        if (anonymous) this.lastAnonCookie = cookieHeader;
-        else this.lastAuthCookie = cookieHeader;
+        this.lastAuthCookie = cookieHeader;
     }
 }
