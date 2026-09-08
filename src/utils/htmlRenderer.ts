@@ -147,7 +147,7 @@ function renderCommentHtml(c: Comment, sub: boolean, stealth: boolean): string {
  *       <article>  — 帖子标题、作者信息、话题标签、正文
  *       <section>  — 评论区：评论组（主评论 + 子评论）
  *     </main>
- *   <script> — 图片缩放逻辑 + 鼠标悬停大图预览
+ *   <script> — 图片缩放逻辑 + 点击在编辑区打开大图
  *
  * @param postTree 帖子完整数据（正文 + 评论组）
  * @param stealth 隐身模式：隐藏头像、点赞数，面板标题伪装为 README.md
@@ -204,7 +204,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .tags{font-size:12px;color:var(--dim);margin-bottom:8px}
     .body{font-size:14px;margin-bottom:20px}
     .body p{margin:6px 0;white-space:pre-wrap}
-    .body img,.cimg{max-width:calc(100%*var(--scale));border-radius:6px;margin:6px 0;display:block;transition:max-width .15s}
+    .body img,.cimg{max-width:calc(100%*var(--scale));border-radius:6px;margin:6px 0;display:block;cursor:zoom-in;transition:max-width .15s}
     .ch{font-size:16px;font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:14px}
     .cg{margin-bottom:14px}
     .cm{display:flex;gap:10px;padding:8px 0}
@@ -222,11 +222,17 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .loadReplies:focus-visible{outline:1px solid var(--vscode-focusBorder,#3794ff);outline-offset:1px}
     .loadReplies:disabled{opacity:.65;cursor:wait}
     .ftr{text-align:center;font-size:12px;color:var(--dim);padding:16px 0 8px}
-    .img-preview{position:fixed;z-index:9999;pointer-events:none;overflow:hidden;border:2px solid var(--border);border-radius:6px;box-shadow:0 4px 20px rgba(0,0,0,.4);display:none;background:var(--bg)}
-    .img-preview img{display:block;border-radius:4px}
+    .image-viewer{position:fixed;z-index:10;inset:0;display:none;flex-direction:column;background:var(--bg)}
+    .image-viewer.open{display:flex}
+    .image-toolbar{display:flex;align-items:center;gap:6px;padding:8px;border-bottom:1px solid var(--border);flex-shrink:0}
+    .image-toolbar button{border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--fg);padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
+    .image-toolbar button:hover{background:var(--badge-bg);color:var(--badge-fg)}.image-toolbar button:disabled{opacity:.65;cursor:wait}
+    .image-status{margin-left:auto;color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .image-stage{flex:1;overflow:auto;padding:12px}
+    .image-stage img{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;border-radius:6px}
 </style></head>
 <body>
-    <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span></div>
+    <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span>点击图片可在编辑区查看大图</span></div>
     <main>
     <article>
     <h1>${escHtml(link.title || "无标题")}</h1>
@@ -240,6 +246,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     ${commentNote ? `<div class="ftr" style="font-style:italic">${escHtml(commentNote)}</div>` : `<div class="ftr">${commentCount} 条评论${foldedTips ? '（已折叠）' : ''}</div>`}
     </section>
     </main>
+    <section id="imageViewer" class="image-viewer" aria-label="图片查看器" aria-hidden="true"><div class="image-toolbar"><button id="closeImage" title="关闭图片查看器">关闭</button><button id="loadOriginal">加载原图</button><span id="imageStatus" class="image-status">当前为展示图</span></div><div id="imageStage" class="image-stage"><img id="viewerImage" alt="帖子图片"></div></section>
 <script>
 (function(){
 var s=document.getElementById('s'),l=document.getElementById('sl'),r=document.documentElement;
@@ -252,24 +259,12 @@ if(main&&savedScrollTop!==null){
   requestAnimationFrame(function(){main.scrollTop=Number(savedScrollTop);sessionStorage.removeItem('hb_scroll_top')});
 }
 
-var pv=document.createElement('div');pv.className='img-preview';var pi=document.createElement('img');pv.appendChild(pi);document.body.appendChild(pv);
-
-function showPreview(cx, cy){
-  var maxW = innerWidth - cx - 20;
-  var maxH = innerHeight - 20;
-  pi.style.maxWidth = maxW + 'px';
-  pi.style.maxHeight = maxH + 'px';
-  pv.style.display = 'block';
-  var x = cx + 20;
-  var y = Math.min(cy, innerHeight - pv.offsetHeight - 10);
-  if(y < 0) y = 0;
-  pv.style.left = x + 'px';
-  pv.style.top = y + 'px';
-}
-
-document.addEventListener('mouseover',function(e){var t=e.target;if(t.tagName==='IMG'&&t.closest('.body img,.cimg')){pi.src=t.src;showPreview(e.clientX, e.clientY)}});
-document.addEventListener('mouseout',function(e){if(e.target.tagName==='IMG'&&e.target.closest('.body img,.cimg'))pv.style.display='none'});
-document.addEventListener('mousemove',function(e){if(pv.style.display==='block')showPreview(e.clientX, e.clientY)});
+var viewer=document.getElementById('imageViewer'),viewerImage=document.getElementById('viewerImage'),imageStage=document.getElementById('imageStage'),loadOriginal=document.getElementById('loadOriginal'),imageStatus=document.getElementById('imageStatus'),imageSource='';
+function closeImage(){viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');}
+document.addEventListener('click',function(e){var t=e.target;if(t.tagName==='IMG'&&t.matches('.body img,.cimg')){imageSource=t.currentSrc||t.src;viewerImage.src=imageSource;viewerImage.alt=t.alt||'帖子图片';imageStatus.textContent='当前为展示图';loadOriginal.disabled=false;loadOriginal.textContent='加载原图';viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');imageStage.scrollTop=0;imageStage.scrollLeft=0;}});
+document.getElementById('closeImage').addEventListener('click',closeImage);document.addEventListener('keydown',function(e){if(e.key==='Escape')closeImage()});
+loadOriginal.addEventListener('click',function(){if(!imageSource)return;loadOriginal.disabled=true;loadOriginal.textContent='正在加载…';imageStatus.textContent='正在请求原图…';acquireVsCodeApi().postMessage({command:'loadOriginalImage',url:imageSource});});
+window.addEventListener('message',function(event){var data=event.data||{};if(data.command==='originalImageOpened'&&viewer.classList.contains('open')){closeImage();return}if(data.command==='originalImage'&&viewer.classList.contains('open')){viewerImage.src=data.url;loadOriginal.textContent='已加载原图';imageStatus.textContent='正在显示原图';return}if(data.command==='originalImageError'&&viewer.classList.contains('open')){loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';imageStatus.textContent='原图加载失败：'+(data.message||'未知错误')}});
 document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';acquireVsCodeApi().postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});
 })();
 </script>

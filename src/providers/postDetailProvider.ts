@@ -14,7 +14,12 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
     /** 被折叠评论的提示文案 */
     private _foldedTips: string = "";
 
-    constructor(private readonly extensionUri: vscode.Uri, private readonly onLoadAll?: (linkId: string, rootId?: string) => void) {}
+    constructor(
+        private readonly extensionUri: vscode.Uri,
+        private readonly onLoadAll?: (linkId: string, rootId?: string) => void,
+        private readonly onRequestOriginalImage?: (url: string) => Promise<string>,
+        private readonly onOpenOriginalImage?: (url: string) => void,
+    ) {}
 
     /**
      * VSCode 回调：当面板首次被激活时调用
@@ -26,6 +31,7 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
         webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
         webviewView.webview.onDidReceiveMessage((msg) => {
             if (msg?.command === "loadReplies" && typeof msg.linkId === "string") this.onLoadAll?.(msg.linkId, msg.rootId);
+            if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) void this.loadOriginalImage(msg.url);
         });
         webviewView.title = getPanelTitle();
         if (this._currentPost) {
@@ -63,7 +69,27 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
     private placeholderHtml(): string {
         return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>body{font-family:var(--vscode-font-family);color:var(--vscode-descriptionForeground);padding:16px;text-align:center;font-size:13px}</style></head><body><p>点击帖子查看详情</p></body></html>`;
     }
+
+    private async loadOriginalImage(imageUrl: string): Promise<void> {
+        if (!this.onRequestOriginalImage) return;
+        try {
+            const url = await this.onRequestOriginalImage(imageUrl);
+            if (this.onOpenOriginalImage) {
+                this.onOpenOriginalImage(url);
+                await this._view?.webview.postMessage({ command: "originalImageOpened" });
+                return;
+            }
+            await this._view?.webview.postMessage({ command: "originalImage", url });
+        } catch (error) {
+            const message = error instanceof Error ? error.message : "未知错误";
+            await this._view?.webview.postMessage({ command: "originalImageError", message });
+        }
+    }
 }
 
 function getPanelTitle(): string { return isStealth() ? "README.md" : "帖子"; }
 function isStealth(): boolean { return vscode.workspace.getConfiguration("heybox").get<boolean>("stealthMode", false); }
+
+function isSupportedImageUrl(value: unknown): value is string {
+    return typeof value === "string" && /^(https?:\/\/|data:image\/)/i.test(value);
+}

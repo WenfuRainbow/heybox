@@ -82,6 +82,8 @@ macOS 下，`Ctrl+Shift+J` 和 `Ctrl+Shift+Enter` 分别对应 `Cmd+Shift+J`、`
 | `heybox.postDetailLocation` | `sidebar` | 帖子详情位置：`sidebar` / `editor` / `beside` |
 | `heybox.theme` | `auto` | Webview 主题：`auto` / `dark` / `light` |
 | `heybox.cookie` | 空 | 仅用于兼容手动导入 Cookie；正常扫码无需设置 |
+| `heybox.proxy` | 空 | HTTP/HTTPS 代理地址，例如 `http://127.0.0.1:7890`；留空即直连 |
+| `heybox.webVersion` | `2.5` | 网页 API 兼容版本；留空时由服务端协商能力 |
 
 `heybox.deviceId` 与 `heybox.heyboxId` 由插件自动生成或提取，通常不需要手动修改。
 
@@ -99,9 +101,11 @@ macOS 下，`Ctrl+Shift+J` 和 `Ctrl+Shift+Enter` 分别对应 `Cmd+Shift+J`、`
 
 ```bash
 npm install
-npm run compile
+npm test
 # 按 F5 启动 Extension Development Host
 ```
+
+`npm test` 会连续执行 TypeScript 编译、ESLint 和不依赖线上账号的离线契约测试。
 
 ## 隐私与免责声明
 

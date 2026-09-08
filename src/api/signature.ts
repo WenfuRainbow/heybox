@@ -149,6 +149,14 @@ export function generateSignature(apiPath: string): Signature {
     const nonce = md5(
         timestamp + Math.random().toString()
     ).toUpperCase();
+    return generateSignatureFor(apiPath, timestamp, nonce);
+}
+
+/**
+ * 使用给定的时间和 nonce 生成签名。
+ * 供离线契约测试验证算法；生产请求仍应使用 generateSignature 生成随机 nonce。
+ */
+export function generateSignatureFor(apiPath: string, timestamp: number, nonce: string): Signature {
     // timestamp + 1 作为签名中的时间偏移
     const hkey = ov(apiPath, timestamp + 1, nonce);
     return { hkey, _time: timestamp, nonce };

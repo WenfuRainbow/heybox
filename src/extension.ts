@@ -12,6 +12,7 @@
  */
 import * as vscode from "vscode";
 import { HeyBoxClient } from "./api/client";
+import { isAuthenticationError, isCaptchaError } from "./api/errors";
 import { PostListProvider, toggleFav, getFavs } from "./providers/postListProvider";
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
 import { SearchItemInfo, PostTreeResult } from "./types";
@@ -22,6 +23,7 @@ let postListProvider: PostListProvider | undefined;
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentPanelPost: PostTreeResult | undefined;
 let currentPanelFoldedTips = "";
+let originalImagePanel: vscode.WebviewPanel | undefined;
 /** 浏览历史最大条数 */
 const MAX_HISTORY = 50;
 /** 消息轮询定时器 */
@@ -97,7 +99,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 });
             }
         }
-    });
+    }, (url) => client.getOriginalImageUrl(url), openOriginalImagePreview);
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
     // 应用隐身模式设置
@@ -111,7 +113,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(statusBarItem);
 
     // 检查 Cookie 是否已配置，未配置则弹窗提示
-    checkCookieAndPrompt(context, client, statusBarItem);
+    checkCookieAndPrompt(context, client);
 
     // ─── 命令注册 ───
 
@@ -210,9 +212,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             await client.favouritePost(linkId);
             vscode.window.showInformationMessage(wasFav ? "已取消收藏（服务端已同步）" : "已收藏（服务端已同步）");
             await postListProvider!.refreshFavourites();
-        } catch {
+        } catch (error) {
             toggleFav(context, post); // 回滚
-            vscode.window.showErrorMessage("收藏失败，请检查网络后重试");
+            const message = error instanceof Error ? error.message : "未知错误";
+            vscode.window.showErrorMessage(`收藏失败: ${message}`);
         }
         postListProvider!.switchTo(postListProvider!.getViewMode());
     }));
@@ -342,17 +345,12 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             context.globalState.update("history", deduped.slice(0, MAX_HISTORY));
 
             const totalCommentNum = tree.link.comment_num || 0;
-            let allCommentGroups = tree.comments || [];
-            const seenIds = new Set<string>();
-            allCommentGroups.forEach(g => { if (g.comment?.[0]) seenIds.add(g.comment[0].commentid); });
-
-            let foldedTips = (tree as any)?.folded_comment_tips || "";
+            const allCommentGroups = tree.comments || [];
+            const foldedTips = (tree as any)?.folded_comment_tips || "";
 
             // 不要在打开帖子后立即尝试多个排序。link/tree 是风控敏感接口，
             // 一次打开产生 4 次重复请求很容易被判定为自动化流量。
             // 默认响应已经包含首屏评论，后续仅按需做分页。
-            let bestSort = "";
-
             // 只展示 link/tree 返回的首屏评论。此前这里会串行分页全部评论，
             // 再逐组请求子评论；帖子内容已经拿到后仍需等待大量请求，明显拖慢点击。
             // 后续如需完整评论，可由详情页单独触发加载。
@@ -402,6 +400,10 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
                 currentPanelPost = fullTree;
                 currentPanelFoldedTips = foldedTips;
                 panel.webview.onDidReceiveMessage((msg) => {
+                    if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) {
+                        void loadOriginalImage(client, panel.webview, msg.url);
+                        return;
+                    }
                     if (msg?.command !== "loadReplies" || typeof msg.linkId !== "string" || typeof msg.rootId !== "string") return;
                     if (currentPanel !== panel || !currentPanelPost) return;
                     void loadRepliesForPost(client, currentPanelPost, msg.linkId, msg.rootId, (updated, note) => {
@@ -421,23 +423,59 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             }
         });
     } catch (e) {
-        const msg = (e as Error).message || "";
-        if (msg.includes("超时")) vscode.window.showErrorMessage("请求超时，请检查网络连接");
-        else if (msg.includes("Cookie")) vscode.window.showErrorMessage(msg);
-        else if (msg.includes("show_captcha")) {
+        if (isCaptchaError(e)) {
             vscode.window.showErrorMessage(
                 "帖子详情被服务端风控拦截，请在浏览器中完成人机验证后重新扫码登录。",
             );
+        } else {
+            const message = e instanceof Error ? e.message : "未知错误";
+            vscode.window.showErrorMessage(`获取帖子详情失败: ${message}`);
         }
-        else vscode.window.showErrorMessage(`获取帖子详情失败: ${msg}`);
     }
+}
+
+async function loadOriginalImage(client: HeyBoxClient, webview: vscode.Webview, imageUrl: string): Promise<void> {
+    try {
+        const originalUrl = await client.getOriginalImageUrl(imageUrl);
+        openOriginalImagePreview(originalUrl);
+        await webview.postMessage({ command: "originalImageOpened" });
+    } catch (error) {
+        const message = error instanceof Error ? error.message : "未知错误";
+        await webview.postMessage({ command: "originalImageError", message });
+    }
+}
+
+/** 原图仅在用户主动请求时打开编辑区预览，避免普通浏览占用主编辑区。 */
+function openOriginalImagePreview(url: string): void {
+    if (!isSupportedImageUrl(url)) return;
+    if (!originalImagePanel) {
+        originalImagePanel = vscode.window.createWebviewPanel(
+            "heybox.originalImage",
+            "原图预览",
+            vscode.ViewColumn.Active,
+            { enableScripts: false },
+        );
+        originalImagePanel.onDidDispose(() => { originalImagePanel = undefined; });
+    } else {
+        originalImagePanel.reveal(vscode.ViewColumn.Active);
+    }
+    originalImagePanel.webview.html = originalImageHtml(url);
+}
+
+function originalImageHtml(url: string): string {
+    const escapedUrl = url.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#039;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline';"><style>body{margin:0;padding:20px;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground)}img{display:block;width:100%;height:auto;margin:auto;border-radius:6px}</style></head><body><img src="${escapedUrl}" alt="原图"></body></html>`;
+}
+
+function isSupportedImageUrl(value: unknown): value is string {
+    return typeof value === "string" && /^(https?:\/\/|data:image\/)/i.test(value);
 }
 
 /**
  * 检查 Cookie 是否已配置，未配置时弹窗提供快捷操作
  */
-function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxClient, statusBarItem?: vscode.StatusBarItem): void {
-    let cookie = client.getCookie();
+function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxClient): void {
+    const cookie = client.getCookie();
 
     if (!cookie) {
         vscode.window.showWarningMessage(
@@ -549,6 +587,21 @@ async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusB
             client.getOfficialMessages(0, 10),
             client.getDiscountMessages(0),
         ]);
+        const rejected = responses
+            .filter((response): response is PromiseRejectedResult => response.status === "rejected")
+            .map((response) => response.reason);
+        if (rejected.some(isAuthenticationError)) {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
+            updateStatusBar(statusBarItem, 0, false);
+            vscode.window.showWarningMessage("小黑盒登录状态已失效，请重新扫码登录。");
+            return;
+        }
+        if (rejected.some(isCaptchaError)) {
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
+            updateStatusBar(statusBarItem, 0, false);
+            vscode.window.showWarningMessage("小黑盒要求人机验证，请在浏览器完成验证后重新扫码登录。");
+            return;
+        }
         const valueAt = <T>(index: number): T | undefined => {
             const response = responses[index];
             if (response.status === "fulfilled") return response.value as T;
@@ -623,9 +676,8 @@ async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusB
             context.globalState.update("heybox.seenMsgIds", seenArr);
         } else updateStatusBar(statusBarItem, unread.length, true);
     } catch (e) {
-        const msg = (e as Error).message || "";
         // Cookie 失效时停止轮询
-        if (msg.includes("Cookie")) {
+        if (isAuthenticationError(e) || isCaptchaError(e)) {
             if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
             updateStatusBar(statusBarItem, 0, false);
         }

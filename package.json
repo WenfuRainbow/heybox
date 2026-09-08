@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "publisher": "kyo",
   "icon": "resources/icon.png",
   "engines": {
@@ -310,6 +310,16 @@
           "default": "",
           "description": "设备 ID（留空则自动生成并持久化）"
         },
+        "heybox.proxy": {
+          "type": "string",
+          "default": "",
+          "description": "HTTP/HTTPS 代理地址，例如 http://127.0.0.1:7890；留空则直接连接小黑盒"
+        },
+        "heybox.webVersion": {
+          "type": "string",
+          "default": "2.5",
+          "description": "网页 API 兼容版本。仅在服务端兼容性变化时调整；留空则让服务端协商能力"
+        },
         "heybox.heyboxId": {
           "type": "string",
           "default": "",
@@ -363,18 +373,22 @@
     "compile": "tsc -p ./",
     "package": "npm run compile && npx @vscode/vsce package",
     "watch": "tsc -watch -p ./",
-    "pretest": "npm run compile && npm run lint",
-    "lint": "eslint src --ext ts",
-    "test": "node ./out/test/runTest.js"
+    "lint": "eslint \"src/**/*.ts\"",
+    "test:unit": "node --test --test-isolation=none \"out/api/__tests__/*.test.js\"",
+    "test": "npm run compile && npm run lint && npm run test:unit"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/qrcode": "^1.5.6",
     "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
     "@vscode/vsce": "^3.9.2",
+    "eslint": "^8.57.1",
     "typescript": "^5.3.0"
   },
   "dependencies": {
+    "https-proxy-agent": "^7.0.6",
     "qrcode": "^1.5.4"
   }
 }

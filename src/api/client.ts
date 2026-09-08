@@ -5,7 +5,10 @@
 
 import * as vscode from "vscode";
 import * as https from "https";
+import { HttpsProxyAgent } from "https-proxy-agent";
 import { generateSignature, Signature } from "./signature";
+import { HeyBoxApiError, apiErrorFromHttpStatus, unwrapApiResponse } from "./errors";
+import { RequestCoordinator, isSensitiveApiPath } from "./requestPolicy";
 import {
     ApiResponse, PostTreeResult, SearchResult, SearchItem, TopicCategoryResult, SearchItemInfo,
     MessageListResult, FavouriteLinksResult, OfficialMessageResult, DiscountMessageResult,
@@ -46,6 +49,11 @@ export class HeyBoxClient {
     private cookie: string = "";
     private deviceId: string = "";
     private heyboxId: string = "";
+    private webVersion: string = "";
+    private proxyAgent?: https.Agent;
+    private proxyError: string = "";
+    private proxyLabel: string = "直连";
+    private readonly requestCoordinator = new RequestCoordinator();
 
     constructor(private context: vscode.ExtensionContext) {}
 
@@ -57,6 +65,8 @@ export class HeyBoxClient {
     async loadConfig(): Promise<void> {
         const config = vscode.workspace.getConfiguration("heybox");
         this.heyboxId = config.get<string>("heyboxId", "");
+        this.webVersion = config.get<string>("webVersion", "").trim();
+        this.configureProxy(config.get<string>("proxy", ""));
         // 每次都重新从 SecretStorage 读取，确保登出后能正确清除
         this.cookie = "";
         await this.refreshCookie();
@@ -79,7 +89,56 @@ export class HeyBoxClient {
      */
     async refreshCookie(): Promise<void> {
         if (this.cookie) return;
-        try { const s = await this.context.secrets.get("heybox.cookie"); if (s) this.cookie = s; } catch {}
+        try {
+            const storedCookie = await this.context.secrets.get("heybox.cookie");
+            if (storedCookie) this.cookie = storedCookie;
+        } catch {
+            // SecretStorage 不可用时保持未登录状态，交由界面提示用户登录。
+        }
+    }
+
+    /** 配置可选的 HTTP/HTTPS 代理；留空时保持直连。 */
+    private configureProxy(value: string): void {
+        const proxy = value.trim();
+        this.proxyAgent = undefined;
+        this.proxyError = "";
+        this.proxyLabel = "直连";
+        if (!proxy) return;
+
+        try {
+            const url = new URL(proxy);
+            if (url.protocol !== "http:" && url.protocol !== "https:") {
+                throw new Error("仅支持 http:// 或 https:// 地址");
+            }
+            this.proxyAgent = new HttpsProxyAgent(url);
+            this.proxyLabel = `代理 ${url.protocol}//${url.host}`;
+        } catch (error) {
+            const detail = error instanceof Error ? error.message : String(error);
+            this.proxyError = `代理地址无效：${detail}`;
+        }
+    }
+
+    private getProxyAgent(): https.Agent | undefined {
+        if (this.proxyError) throw new Error(this.proxyError);
+        return this.proxyAgent;
+    }
+
+    /** 将底层网络错误转换成可区分、可操作的提示。 */
+    private networkErrorMessage(error: NodeJS.ErrnoException): string {
+        const connection = this.proxyAgent ? `${this.proxyLabel}连接` : "直连";
+        switch (error.code) {
+            case "ENOTFOUND":
+            case "EAI_AGAIN":
+                return `${connection}无法解析小黑盒服务器地址，请检查 DNS 或代理设置`;
+            case "ECONNREFUSED":
+                return `${connection}被拒绝，请检查网络或代理设置`;
+            case "ECONNRESET":
+                return `${connection}被远端服务器或网络设备重置`;
+            case "ETIMEDOUT":
+                return `${connection}超时，请检查网络或代理设置`;
+            default:
+                return `${connection}失败${error.code ? ` (${error.code})` : ""}: ${error.message}`;
+        }
     }
 
     /**
@@ -99,12 +158,15 @@ export class HeyBoxClient {
      * @returns 包含公共参数的对象
      */
     private getCommonParams(): Record<string, string> {
-        return {
+        const params: Record<string, string> = {
             os_type: "web", app: "heybox", client_type: "web", version: "999.0.4",
-            web_version: "2.5", x_client_type: "web", x_app: "heybox_website",
+            x_client_type: "web", x_app: "heybox_website",
             heybox_id: this.heyboxId, x_os_type: "Windows", device_info: "Chrome",
             device_id: this.deviceId,
         };
+        // 由设置提供兼容版本；留空时让服务端按客户端能力协商。
+        if (this.webVersion) params.web_version = this.webVersion;
+        return params;
     }
 
     /** 二维码登录采用网页端匿名客户端参数，且不携带已有登录会话。 */
@@ -187,7 +249,7 @@ export class HeyBoxClient {
         const url = this.buildUrl(path, params, this.getQrLoginParams());
         const headers = this.buildHeaders(this.cookieHeader(cookies));
         return new Promise<AnonymousResponse<T>>((resolve, reject) => {
-            const req = https.get(url, { headers }, (res) => {
+            const req = https.get(url, { headers, agent: this.getProxyAgent() }, (res) => {
                 let data = "";
                 res.on("data", (chunk) => (data += chunk));
                 res.on("end", () => {
@@ -201,7 +263,7 @@ export class HeyBoxClient {
                 res.on("error", reject);
             });
             req.setTimeout(15000, () => { req.destroy(); reject(new Error("二维码登录请求超时，请检查网络")); });
-            req.on("error", (e: NodeJS.ErrnoException) => reject(new Error(`二维码登录网络错误: ${e.message}`)));
+            req.on("error", (e: NodeJS.ErrnoException) => reject(new Error(`二维码登录${this.networkErrorMessage(e)}`)));
         });
     }
 
@@ -213,21 +275,12 @@ export class HeyBoxClient {
      * @returns 原始 API 响应
      */
     private async getRaw(path: string, params?: Record<string, string>): Promise<ApiResponse<unknown>> {
-        if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
-        const url = this.buildUrl(path, params);
-        const headers = this.buildHeaders();
-        return new Promise<ApiResponse<unknown>>((resolve, reject) => {
-            const req = https.get(url, { headers }, (res) => {
-                let data = "";
-                res.on("data", (c) => (data += c));
-                res.on("end", () => {
-                    try { resolve(JSON.parse(data)); }
-                    catch { reject(new Error(`解析响应失败: ${data.substring(0, 200)}`)); }
-                });
-                res.on("error", reject);
-            });
-            req.setTimeout(15000, () => { req.destroy(); reject(new Error("请求超时")); });
-            req.on("error", (e: NodeJS.ErrnoException) => reject(new Error(`网络错误: ${e.message}`)));
+        this.requireCookie();
+        return this.request<ApiResponse<unknown>>("GET", path, params, undefined, (payload) => {
+            if (!payload || typeof payload !== "object") {
+                throw new HeyBoxApiError("response", "服务端返回了无法识别的响应，请稍后重试");
+            }
+            return payload as ApiResponse<unknown>;
         });
     }
 
@@ -239,29 +292,112 @@ export class HeyBoxClient {
      * @returns 解析后的业务数据
      */
     private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
-        if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie：打开设置搜索 heybox.cookie，粘贴 Cookie 值");
-        const url = this.buildUrl(path, params);
-        const headers = this.buildHeaders();
-        return new Promise<T>((resolve, reject) => {
-            const req = https.get(url, { headers }, (res) => {
-                let data = "";
-                res.on("data", (c) => (data += c));
-                res.on("end", () => {
-                    try {
-                        const json: ApiResponse<T> = JSON.parse(data);
-                        if (json.status === "ok") resolve(json.result);
-                        else if (json.status === "login" || json.status === "relogin") reject(new Error("Cookie 已过期或无效，请重新从浏览器复制 Cookie"));
-                        else reject(new Error(json.msg || `API error: ${json.status}`));
-                    } catch { reject(new Error(`解析响应失败: ${data.substring(0, 200)}`)); }
+        this.requireCookie();
+        return this.request<T>("GET", path, params, undefined, unwrapApiResponse<T>);
+    }
+
+    private requireCookie(): void {
+        if (!this.validateCookie(this.cookie)) {
+            throw new HeyBoxApiError("authentication", "请先配置 Cookie：打开设置搜索 heybox.cookie，或使用扫码登录");
+        }
+    }
+
+    /**
+     * 所有已登录 API 的统一入口：相同请求合并、敏感接口限流、临时错误指数退避。
+     * key 不包含签名，确保用户连续点击和轮询重叠时会共享同一个请求。
+     */
+    private async request<T>(
+        method: "GET" | "POST",
+        path: string,
+        params: Record<string, string> | undefined,
+        body: Record<string, string> | undefined,
+        parse: (payload: unknown) => T,
+    ): Promise<T> {
+        const key = this.requestKey(method, path, params, body);
+        try {
+            return await this.requestCoordinator.execute(key, isSensitiveApiPath(path), async () => {
+                const payload = await this.requestJson(method, path, params, body);
+                return parse(payload);
+            });
+        } catch (error) {
+            if (error instanceof HeyBoxApiError) throw error;
+            const networkError = error as NodeJS.ErrnoException;
+            throw new HeyBoxApiError("network", this.networkErrorMessage(networkError));
+        }
+    }
+
+    private requestKey(
+        method: "GET" | "POST",
+        path: string,
+        params?: Record<string, string>,
+        body?: Record<string, string>,
+    ): string {
+        const encode = (value?: Record<string, string>) => Object.entries(value || {})
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([key, item]) => `${key}=${item}`).join("&");
+        return `${method} ${path}?${encode(params)}#${encode(body)}`;
+    }
+
+    /** 单次 HTTPS 请求；重试、并发和去重由 request() 的协调器处理。 */
+    private requestJson(
+        method: "GET" | "POST",
+        path: string,
+        params?: Record<string, string>,
+        body?: Record<string, string>,
+    ): Promise<unknown> {
+        return new Promise<unknown>((resolve, reject) => {
+            let settled = false;
+            const fail = (error: unknown) => {
+                if (!settled) {
+                    settled = true;
+                    reject(error);
+                }
+            };
+            const succeed = (value: unknown) => {
+                if (!settled) {
+                    settled = true;
+                    resolve(value);
+                }
+            };
+            try {
+                const url = this.buildUrl(path, params);
+                const headers = {
+                    ...this.buildHeaders(),
+                    ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" } : {}),
+                };
+                const onResponse = (res: import("http").IncomingMessage) => {
+                    let data = "";
+                    res.on("data", (chunk) => { data += chunk; });
+                    res.on("end", () => {
+                        if ((res.statusCode || 200) >= 400) {
+                            fail(apiErrorFromHttpStatus(res.statusCode || 500));
+                            return;
+                        }
+                        try {
+                            succeed(JSON.parse(data));
+                        } catch {
+                            fail(new HeyBoxApiError("response", `解析响应失败: ${data.substring(0, 200)}`));
+                        }
+                    });
+                    res.on("error", fail);
+                };
+                const request = method === "GET"
+                    ? https.get(url, { headers, agent: this.getProxyAgent() }, onResponse)
+                    : https.request(url, { method, headers, agent: this.getProxyAgent() }, onResponse);
+                request.setTimeout(15_000, () => {
+                    request.destroy();
+                    fail(new HeyBoxApiError("timeout", `${this.proxyAgent ? this.proxyLabel : "直连"}请求超时，请检查网络或代理设置`, true));
                 });
-                res.on("error", reject);
-            });
-            req.setTimeout(15000, () => { req.destroy(); reject(new Error("请求超时，请检查网络连接")); });
-            req.on("error", (e: NodeJS.ErrnoException) => {
-                if (e.code === 'ENOTFOUND' || e.code === 'ECONNREFUSED') reject(new Error("网络连接失败，请检查网络"));
-                else if (e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT') reject(new Error("连接被重置"));
-                else reject(new Error(`网络错误: ${e.message}`));
-            });
+                request.on("error", fail);
+                if (method === "POST") {
+                    const bodyString = Object.entries(body || {})
+                        .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`).join("&");
+                    request.write(bodyString);
+                    request.end();
+                }
+            } catch (error) {
+                fail(error);
+            }
         });
     }
 
@@ -278,6 +414,17 @@ export class HeyBoxClient {
         p.limit = limit > 0 ? String(limit) : "100";
         if (sortFilter) p.sort_filter = sortFilter;
         return this.get<PostTreeResult>("/bbs/app/link/tree", p);
+    }
+
+    /**
+     * 将帖子正文中的展示图 URL 换成小黑盒返回的原图 URL。
+     * 接口的 imgs 字段在不同版本中可能是 URL 字符串或 JSON 字符串，统一解析为首个 HTTPS 地址。
+     */
+    async getOriginalImageUrl(imageUrl: string): Promise<string> {
+        const result = await this.get<unknown>("/bbs/app/api/original/image", { url: imageUrl });
+        const originalUrl = findImageUrl(result);
+        if (!originalUrl) throw new Error("服务端未返回可用的原图地址");
+        return originalUrl;
     }
 
     /** 获取某条主评论下的子评论（回复），支持使用上一页最后一条评论 ID 分页。 */
@@ -366,27 +513,9 @@ export class HeyBoxClient {
      * @returns 解析后的业务数据
      */
     async post<T>(path: string, body: Record<string, string>, params?: Record<string, string>): Promise<T> {
-        if (!this.validateCookie(this.cookie)) throw new Error("请先配置 Cookie");
-        const url = this.buildUrl(path, params);
-        const headers = { ...this.buildHeaders(), "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" };
-        const bodyStr = Object.entries(body).map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`).join("&");
-        return new Promise<T>((resolve, reject) => {
-            const req = https.request(url, { method: "POST", headers }, (res) => {
-                let data = "";
-                res.on("data", (c) => (data += c));
-                res.on("end", () => {
-                    try {
-                        const json: ApiResponse<T> = JSON.parse(data);
-                        if (json.status === "ok") resolve(json.result);
-                        else reject(new Error(json.msg || `API error: ${json.status}`));
-                    } catch { reject(new Error(`解析失败: ${data.substring(0, 200)}`)); }
-                });
-                res.on("error", reject);
-            });
-            req.setTimeout(15000, () => { req.destroy(); reject(new Error("请求超时")); });
-            req.write(bodyStr);
-            req.end();
-        });
+        this.requireCookie();
+        // unwrapApiResponse 同时识别 login、relogin 与 show_captcha，避免 POST 被误报为普通 API 错误。
+        return this.request<T>("POST", path, params, body, unwrapApiResponse<T>);
     }
 
     /**
@@ -587,5 +716,28 @@ export class HeyBoxClient {
     getContext(): vscode.ExtensionContext {
         return this.context;
     }
+}
+
+/** 从原图接口的多种响应形态中提取第一个 HTTPS 图片地址。 */
+function findImageUrl(value: unknown): string {
+    if (typeof value === "string") {
+        const text = value.trim();
+        if (/^https:\/\//i.test(text)) return text;
+        try { return findImageUrl(JSON.parse(text)); } catch { return ""; }
+    }
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const url = findImageUrl(item);
+            if (url) return url;
+        }
+        return "";
+    }
+    if (!value || typeof value !== "object") return "";
+    const fields = value as Record<string, unknown>;
+    for (const key of ["imgs", "original", "url", "img", "image"]) {
+        const url = findImageUrl(fields[key]);
+        if (url) return url;
+    }
+    return "";
 }
 
