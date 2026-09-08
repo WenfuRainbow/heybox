@@ -9,6 +9,7 @@ import { HttpsProxyAgent } from "https-proxy-agent";
 import { generateSignature, Signature } from "./signature";
 import { HeyBoxApiError, apiErrorFromHttpStatus, unwrapApiResponse } from "./errors";
 import { RequestCoordinator, isSensitiveApiPath } from "./requestPolicy";
+import { BrowserNetworkClient, findBrowserExecutablePath } from "./browserClient";
 import {
     ApiResponse, PostTreeResult, SearchResult, SearchItem, TopicCategoryResult, SearchItemInfo,
     MessageListResult, FavouriteLinksResult, OfficialMessageResult, DiscountMessageResult,
@@ -53,6 +54,10 @@ export class HeyBoxClient {
     private proxyAgent?: https.Agent;
     private proxyError: string = "";
     private proxyLabel: string = "直连";
+    private proxyValue: string = "";
+    private browserMode: "auto" | "node" | "browser" = "auto";
+    private browserPath: string = "";
+    private browserNetwork?: BrowserNetworkClient;
     private readonly requestCoordinator = new RequestCoordinator();
 
     constructor(private context: vscode.ExtensionContext) {}
@@ -66,6 +71,8 @@ export class HeyBoxClient {
         const config = vscode.workspace.getConfiguration("heybox");
         this.heyboxId = config.get<string>("heyboxId", "");
         this.webVersion = config.get<string>("webVersion", "").trim();
+        this.browserMode = config.get<"auto" | "node" | "browser">("browserMode", "auto");
+        this.browserPath = config.get<string>("browserPath", "").trim();
         this.configureProxy(config.get<string>("proxy", ""));
         // 每次都重新从 SecretStorage 读取，确保登出后能正确清除
         this.cookie = "";
@@ -100,9 +107,11 @@ export class HeyBoxClient {
     /** 配置可选的 HTTP/HTTPS 代理；留空时保持直连。 */
     private configureProxy(value: string): void {
         const proxy = value.trim();
+        this.proxyValue = proxy;
         this.proxyAgent = undefined;
         this.proxyError = "";
         this.proxyLabel = "直连";
+        this.browserNetwork?.configure({ proxy, browserPath: this.browserPath });
         if (!proxy) return;
 
         try {
@@ -246,6 +255,9 @@ export class HeyBoxClient {
 
     /** 执行不需要登录态的请求，并把 Set-Cookie 保留给二维码会话。 */
     private async anonymousGet<T>(path: string, params: Record<string, string>, cookies: Record<string, string>): Promise<AnonymousResponse<T>> {
+        if (this.shouldUseBrowserTransport()) {
+            return this.anonymousGetViaBrowser<T>(path, params, cookies);
+        }
         const url = this.buildUrl(path, params, this.getQrLoginParams());
         const headers = this.buildHeaders(this.cookieHeader(cookies));
         return new Promise<AnonymousResponse<T>>((resolve, reject) => {
@@ -265,6 +277,28 @@ export class HeyBoxClient {
             req.setTimeout(15000, () => { req.destroy(); reject(new Error("二维码登录请求超时，请检查网络")); });
             req.on("error", (e: NodeJS.ErrnoException) => reject(new Error(`二维码登录${this.networkErrorMessage(e)}`)));
         });
+    }
+
+    private async anonymousGetViaBrowser<T>(path: string, params: Record<string, string>, cookies: Record<string, string>): Promise<AnonymousResponse<T>> {
+        const url = this.buildUrl(path, params, this.getQrLoginParams());
+        const headers = this.buildHeaders(this.cookieHeader(cookies));
+        const result = await this.getBrowserNetwork().request({
+            method: "GET",
+            url,
+            headers,
+            cookie: this.cookieHeader(cookies),
+            anonymous: true,
+        });
+        if ((result.status || 200) >= 400) {
+            throw new Error(`二维码登录请求失败(HTTP ${result.status})`);
+        }
+        let payload: ApiResponse<T>;
+        try {
+            payload = JSON.parse(result.body);
+        } catch {
+            throw new Error(`解析二维码登录响应失败: ${result.body.substring(0, 200)}`);
+        }
+        return { payload, cookies: result.cookies };
     }
 
     /**
@@ -321,6 +355,10 @@ export class HeyBoxClient {
             });
         } catch (error) {
             if (error instanceof HeyBoxApiError) throw error;
+            if (this.shouldUseBrowserTransport()) {
+                const detail = error instanceof Error ? error.message : String(error);
+                throw new HeyBoxApiError("network", `浏览器请求失败: ${detail}`, true);
+            }
             const networkError = error as NodeJS.ErrnoException;
             throw new HeyBoxApiError("network", this.networkErrorMessage(networkError));
         }
@@ -345,6 +383,9 @@ export class HeyBoxClient {
         params?: Record<string, string>,
         body?: Record<string, string>,
     ): Promise<unknown> {
+        if (this.shouldUseBrowserTransport()) {
+            return this.requestJsonViaBrowser(method, path, params, body);
+        }
         return new Promise<unknown>((resolve, reject) => {
             let settled = false;
             const fail = (error: unknown) => {
@@ -399,6 +440,51 @@ export class HeyBoxClient {
                 fail(error);
             }
         });
+    }
+
+    private async requestJsonViaBrowser(
+        method: "GET" | "POST",
+        path: string,
+        params?: Record<string, string>,
+        body?: Record<string, string>,
+    ): Promise<unknown> {
+        const headers: Record<string, string> = {
+            ...this.buildHeaders(),
+            ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" } : {}),
+        };
+        const result = await this.getBrowserNetwork().request({
+            method,
+            url: this.buildUrl(path, params),
+            headers,
+            cookie: this.cookie,
+            body: method === "POST" ? this.encodeFormBody(body || {}) : undefined,
+        });
+        if ((result.status || 200) >= 400) {
+            throw apiErrorFromHttpStatus(result.status);
+        }
+        try {
+            return JSON.parse(result.body);
+        } catch {
+            throw new HeyBoxApiError("response", `解析响应失败: ${result.body.substring(0, 200)}`);
+        }
+    }
+
+    private encodeFormBody(body: Record<string, string>): string {
+        return Object.entries(body)
+            .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
+            .join("&");
+    }
+
+    private shouldUseBrowserTransport(): boolean {
+        if (this.browserMode === "browser") return true;
+        if (this.browserMode === "node") return false;
+        return Boolean(this.browserPath || findBrowserExecutablePath());
+    }
+
+    private getBrowserNetwork(): BrowserNetworkClient {
+        if (!this.browserNetwork) this.browserNetwork = new BrowserNetworkClient();
+        this.browserNetwork.configure({ proxy: this.proxyValue, browserPath: this.browserPath });
+        return this.browserNetwork;
     }
 
     /**
@@ -707,6 +793,12 @@ export class HeyBoxClient {
      */
     getCookie(): string {
         return this.cookie;
+    }
+
+    /** 释放浏览器进程等资源；扩展停用时调用。 */
+    dispose(): void {
+        void this.browserNetwork?.dispose();
+        this.browserNetwork = undefined;
     }
 
     /**
