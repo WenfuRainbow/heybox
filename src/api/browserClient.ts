@@ -1,7 +1,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { spawnSync } from "child_process";
-import puppeteer, { Browser, Page } from "puppeteer-core";
+import puppeteer, { Browser, BrowserContext, Page } from "puppeteer-core";
 
 const API_BASE = "https://api.xiaoheihe.cn";
 const BOOTSTRAP_PATH = "/bbs/app/topic/categories";
@@ -79,8 +79,8 @@ async function applyCookies(page: Page, cookieHeader: string): Promise<void> {
     if (cookies.length > 0) await page.setCookie(...cookies);
 }
 
-async function cookiesAfterRequest(page: Page): Promise<Record<string, string>> {
-    const cookies = await page.cookies(API_BASE);
+async function cookiesAfterRequest(context: BrowserContext): Promise<Record<string, string>> {
+    const cookies = await context.cookies();
     const result: Record<string, string> = {};
     for (const cookie of cookies) result[cookie.name] = cookie.value;
     return result;
@@ -194,8 +194,6 @@ export class BrowserNetworkClient {
         try {
             await this.loadBootstrap(page);
             const cookieHeader = options.cookie ?? "";
-            const existing = await context.cookies();
-            if (existing.length > 0) await context.deleteCookie(...existing);
             if (cookieHeader.trim()) await applyCookies(page, cookieHeader);
 
             const result = await page.evaluate(fetchInBrowser, {
@@ -205,7 +203,7 @@ export class BrowserNetworkClient {
                 body: options.method === "POST" ? options.body : undefined,
                 timeoutMs: REQUEST_TIMEOUT_MS,
             });
-            return { ...result, cookies: await cookiesAfterRequest(page) };
+            return { ...result, cookies: await cookiesAfterRequest(context) };
         } finally {
             await context.close().catch(() => undefined);
         }
