@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "publisher": "kyo",
   "icon": "resources/icon.png",
   "engines": {
@@ -315,6 +315,27 @@
           "default": "",
           "description": "HTTP/HTTPS 代理地址，例如 http://127.0.0.1:7890；留空则直接连接小黑盒"
         },
+        "heybox.browserMode": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "node",
+            "browser"
+          ],
+          "enumDescriptions": [
+            "自动选择：检测到本机 Edge/Chrome 时使用浏览器通道，否则退回 Node 请求",
+            "始终使用 Node 原生 HTTPS 请求",
+            "始终使用本机 Edge/Chrome 浏览器通道"
+          ],
+          "description": "API 请求通道。小黑盒对 Node TLS 指纹存在风控时，建议使用浏览器通道"
+        },
+        "heybox.browserPath": {
+          "type": "string",
+          "scope": "machine",
+          "default": "",
+          "description": "Edge/Chrome 可执行文件路径，例如 C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe；留空则自动查找"
+        },
         "heybox.webVersion": {
           "type": "string",
           "default": "2.5",
@@ -374,7 +395,7 @@
     "package": "npm run compile && npx @vscode/vsce package",
     "watch": "tsc -watch -p ./",
     "lint": "eslint \"src/**/*.ts\"",
-    "test:unit": "node --test --test-isolation=none \"out/api/__tests__/*.test.js\"",
+    "test:unit": "node --test out/api/__tests__/requestPolicy.test.js out/api/__tests__/responseContract.test.js out/api/__tests__/signature.test.js",
     "test": "npm run compile && npm run lint && npm run test:unit"
   },
   "devDependencies": {
@@ -389,6 +410,7 @@
   },
   "dependencies": {
     "https-proxy-agent": "^7.0.6",
+    "puppeteer-core": "^23.11.1",
     "qrcode": "^1.5.4"
   }
 }

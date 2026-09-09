@@ -83,6 +83,8 @@ macOS 下，`Ctrl+Shift+J` 和 `Ctrl+Shift+Enter` 分别对应 `Cmd+Shift+J`、`
 | `heybox.theme` | `auto` | Webview 主题：`auto` / `dark` / `light` |
 | `heybox.cookie` | 空 | 仅用于兼容手动导入 Cookie；正常扫码无需设置 |
 | `heybox.proxy` | 空 | HTTP/HTTPS 代理地址，例如 `http://127.0.0.1:7890`；留空即直连 |
+| `heybox.browserMode` | `auto` | 请求通道：`auto` / `node` / `browser`；小黑盒风控 Node TLS 指纹时使用 `browser` |
+| `heybox.browserPath` | 空 | Edge/Chrome 可执行文件路径；留空则自动查找本机浏览器 |
 | `heybox.webVersion` | `2.5` | 网页 API 兼容版本；留空时由服务端协商能力 |
 
 `heybox.deviceId` 与 `heybox.heyboxId` 由插件自动生成或提取，通常不需要手动修改。
@@ -111,4 +113,5 @@ npm test
 
 - 插件仅通过小黑盒 API 读取论坛数据，不收集用户数据。
 - 扫码二维码在本地生成；登录凭证仅存放于 VS Code SecretStorage，不写入明文配置或 Webview。
+- 浏览器通道会使用本地无头 Edge/Chrome 发起 API 请求，Cookie 仍只在本机处理。
 - 本项目为非官方开源项目，仅供学习交流。小黑盒及相关数据的权利归其权利人所有。

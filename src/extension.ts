@@ -20,6 +20,7 @@ import { postHtml } from "./utils/htmlRenderer";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
+let activeClient: HeyBoxClient | undefined;
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentPanelPost: PostTreeResult | undefined;
 let currentPanelFoldedTips = "";
@@ -78,6 +79,7 @@ function notificationTimestamp(value: number | undefined): number | undefined {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
     // 初始化 API 客户端并加载配置
     const client = new HeyBoxClient(context);
+    activeClient = client;
     await client.loadConfig();
     postListProvider = new PostListProvider(client);
     postListProvider.setContext(context);
@@ -703,6 +705,8 @@ function applyStealthMode(): void {
  */
 export function deactivate(): void {
     postListProvider?.dispose();
+    activeClient?.dispose();
+    activeClient = undefined;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
 }
 
