@@ -4,6 +4,14 @@
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
   "version": "0.1.17",
   "publisher": "kyo",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/WenfuRainbow/heybox.git"
+  },
+  "homepage": "https://github.com/WenfuRainbow/heybox#readme",
+  "bugs": {
+    "url": "https://github.com/WenfuRainbow/heybox/issues"
+  },
   "icon": "resources/icon.png",
   "engines": {
     "vscode": "^1.85.0"

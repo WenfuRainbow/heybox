@@ -10,8 +10,9 @@ main.js
 crypto.js
 topic_*.js
 tsconfig.json
-LICENSE
 .mimocode/**
+.github/**
+dist/**
 out/auth/authManager.js
 out/auth/browserLogin.js
 out/auth/cookieExtractor.js

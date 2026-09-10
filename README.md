@@ -109,6 +109,29 @@ npm test
 
 `npm test` 会连续执行 TypeScript 编译、ESLint 和不依赖线上账号的离线契约测试。
 
+## 自动构建与发布
+
+仓库中的 GitHub Actions 会在提交或拉取请求进入 `master` 时自动执行测试并打包 VSIX。正式发布由 `v*.*.*` 标签触发，只有标签版本与 `package.json` 中的 `version` 完全一致时，构建产物才会发布到 Visual Studio Marketplace。
+
+首次启用前需要完成一次配置：
+
+1. 确认当前 Microsoft 账号可以管理 Marketplace 发布者 `kyo`。
+2. 在 Azure DevOps 创建 Personal Access Token：Organization 选择 **All accessible organizations**，Scope 只授予 **Marketplace > Manage**。
+3. 在 GitHub 仓库的 **Settings > Environments** 创建 `vscode-marketplace` 环境。
+4. 在该环境的 **Environment secrets** 中新增名为 `VSCE_PAT` 的 Secret，值为上一步创建的 Token。不要把 Token 写入代码或工作流文件。
+
+发布新版本时执行：
+
+```bash
+# patch 也可以替换为 minor 或 major
+npm version patch
+git push origin master --follow-tags
+```
+
+`npm version` 会同时更新 `package.json`、`package-lock.json` 并创建对应的 `vX.Y.Z` 标签。普通 push 只构建，不会覆盖或重复发布 Marketplace 版本。构建生成的 VSIX 可以从对应 GitHub Actions 运行记录的 Artifacts 中下载。
+
+> Microsoft 已宣布将于 2026 年 12 月 1 日停用 Azure DevOps 全局 PAT。待稳定版 `@vscode/vsce` 提供 GitHub OIDC 可信发布后，应将工作流迁移为短期凭据认证；在此之前请为 `VSCE_PAT` 设置尽可能短的有效期并按期轮换。
+
 ## 隐私与免责声明
 
 - 插件仅通过小黑盒 API 读取论坛数据，不收集用户数据。
