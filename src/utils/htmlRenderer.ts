@@ -199,6 +199,8 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     main{flex:1;overflow-y:auto;padding:16px 24px}
     .ctrl label{white-space:nowrap}
     .ctrl input{flex:1;max-width:160px;accent-color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer}
+    .ctrl-hint{white-space:nowrap}
+    @media (max-width:480px){.ctrl{gap:6px;padding:6px 12px}.ctrl-hint{display:none}}
     h1{font-size:22px;font-weight:700;margin-bottom:10px}
     .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
     .tags{font-size:12px;color:var(--dim);margin-bottom:8px}
@@ -232,7 +234,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .image-stage img{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;border-radius:6px}
 </style></head>
 <body>
-    <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span>点击图片可在编辑区查看大图</span></div>
+    <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span class="ctrl-hint">点击图片可在编辑区查看大图</span></div>
     <main>
     <article>
     <h1>${escHtml(link.title || "无标题")}</h1>
