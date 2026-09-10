@@ -128,7 +128,7 @@ npm version patch
 git push origin master --follow-tags
 ```
 
-`npm version` 会同时更新 `package.json`、`package-lock.json` 并创建对应的 `vX.Y.Z` 标签。普通 push 只构建，不会覆盖或重复发布 Marketplace 版本。构建生成的 VSIX 可以从对应 GitHub Actions 运行记录的 Artifacts 中下载。
+`npm version` 会同时更新 `package.json`、`package-lock.json` 并创建对应的 `vX.Y.Z` 标签。普通 push 只构建，不会覆盖或重复发布 Marketplace 版本。标签发布成功后，同一个 VSIX 会作为 GitHub Release Asset 上传，也可从对应 GitHub Actions 运行记录的 Artifacts 中下载。
 
 > Microsoft 已宣布将于 2026 年 12 月 1 日停用 Azure DevOps 全局 PAT。待稳定版 `@vscode/vsce` 提供 GitHub OIDC 可信发布后，应将工作流迁移为短期凭据认证；在此之前请为 `VSCE_PAT` 设置尽可能短的有效期并按期轮换。
 

@@ -70,6 +70,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: vscode-marketplace
+    permissions:
+      contents: write
 
     steps:
       - name: Check out repository
@@ -104,3 +106,15 @@ jobs:
         run: npx vsce publish --packagePath "dist/heybox-forum-${GITHUB_REF_NAME#v}.vsix"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      - name: Attach VSIX to GitHub Release
+        shell: bash
+        run: |
+          vsix_path="dist/heybox-forum-${GITHUB_REF_NAME#v}.vsix"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "$vsix_path" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$vsix_path" --title "$GITHUB_REF_NAME" --generate-notes
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
