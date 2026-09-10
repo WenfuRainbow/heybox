@@ -13,7 +13,12 @@ import { BrowserNetworkClient, findBrowserExecutablePath } from "./browserClient
 import {
     ApiResponse, PostTreeResult, SearchResult, SearchItem, TopicCategoryResult, SearchItemInfo,
     MessageListResult, FavouriteLinksResult, OfficialMessageResult, DiscountMessageResult,
+    CommunityBannerResult, SearchWelcomeResult, FavouriteFolder, UserPermission,
 } from "../types";
+import {
+    normalizeCommunityBanner, normalizeFavouriteFolders, normalizePermission,
+    normalizePostList, normalizeSearchWelcome,
+} from "./normalizers";
 
 const API_BASE = "https://api.xiaoheihe.cn";
 const REFERER = "https://www.xiaoheihe.cn/";
@@ -582,6 +587,40 @@ export class HeyBoxClient {
         return this.get<{ links: SearchItemInfo[] }>("/bbs/app/feeds", { offset: String(offset), pull, dw: "800" });
     }
 
+    /** 获取首页的已关注社区与热门社区横幅。 */
+    async getCommunityBanner(): Promise<CommunityBannerResult> {
+        return normalizeCommunityBanner(await this.get<unknown>("/bbs/app/feeds/banner", { dw: "800" }));
+    }
+
+    /** 获取搜索首页热搜词和建议词。 */
+    async getSearchWelcome(): Promise<SearchWelcomeResult> {
+        return normalizeSearchWelcome(await this.get<unknown>("/bbs/app/api/search/welcome_page/v2", { search_type: "link" }));
+    }
+
+    /** 获取详情页相关推荐。 */
+    async getRelatedRecommendations(linkId: string): Promise<SearchItemInfo[]> {
+        return normalizePostList(await this.get<unknown>("/bbs/app/link/related/recommend_web", {
+            link_id: linkId,
+            dw: "800",
+        }));
+    }
+
+    /** 读取当前用户对某帖的操作权限；本方法不会执行任何写操作。 */
+    async getUserPermission(linkId: string): Promise<UserPermission> {
+        return normalizePermission(await this.get<unknown>("/bbs/app/api/user/permission", { link_id: linkId }));
+    }
+
+    /** 读取作者公开帖子列表。 */
+    async getUserLinks(userId: string, offset: number = 0, limit: number = 30): Promise<SearchItemInfo[]> {
+        return normalizePostList(await this.get<unknown>("/bbs/app/profile/user/link/list/v2", {
+            user_id: userId,
+            userid: userId,
+            offset: String(offset),
+            limit: String(limit),
+            dw: "800",
+        }));
+    }
+
     /**
      * 获取话题分类列表
      * @returns 话题分类数据
@@ -641,13 +680,15 @@ export class HeyBoxClient {
     }
 
     /** 获取服务端默认收藏夹的帖子列表，不依赖本地缓存。 */
-    async getFavouriteLinks(offset: number = 0, limit: number = 30): Promise<{ links: SearchItemInfo[]; hasMore: boolean }> {
-        const result = await this.get<FavouriteLinksResult>("/bbs/app/profile/fav/folder/v2/links", {
+    async getFavouriteLinks(offset: number = 0, limit: number = 30, folderId?: string): Promise<{ links: SearchItemInfo[]; hasMore: boolean }> {
+        const params: Record<string, string> = {
             enable_new_style_collect: "1",
             dw: "800",
             offset: String(offset),
             limit: String(limit),
-        });
+        };
+        if (folderId) params.folder_id = folderId;
+        const result = await this.get<FavouriteLinksResult>("/bbs/app/profile/fav/folder/v2/links", params);
         const links = (result.links || [])
             .filter((item) => String(item?.is_deleted || "0") !== "1" && item?.link?.linkid)
             .map((item) => item.link!)
@@ -655,6 +696,13 @@ export class HeyBoxClient {
         const flag = result.has_next;
         const hasMore = flag === "1" || flag === 1 || flag === true;
         return { links, hasMore };
+    }
+
+    /** 获取账号实际收藏夹，而不是假定只有默认收藏夹。 */
+    async getFavouriteFolders(): Promise<FavouriteFolder[]> {
+        return normalizeFavouriteFolders(await this.get<unknown>("/bbs/app/profile/fav/folders", {
+            enable_new_style_collect: "1",
+        }));
     }
 
     /** 获取官方公告、活动及开发者动态；subEntry 缺省时读取官方消息主列表。 */

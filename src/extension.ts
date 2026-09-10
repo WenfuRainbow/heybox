@@ -15,11 +15,13 @@ import { HeyBoxClient } from "./api/client";
 import { isAuthenticationError, isCaptchaError } from "./api/errors";
 import { PostListProvider, toggleFav, getFavs } from "./providers/postListProvider";
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
+import { FeedViewProvider } from "./providers/feedViewProvider";
 import { SearchItemInfo, PostTreeResult } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
+let feedViewProvider: FeedViewProvider | undefined;
 let activeClient: HeyBoxClient | undefined;
 let currentPanel: vscode.WebviewPanel | undefined;
 let currentPanelPost: PostTreeResult | undefined;
@@ -84,6 +86,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     postListProvider = new PostListProvider(client);
     postListProvider.setContext(context);
 
+    feedViewProvider = new FeedViewProvider(client, context, async (post) => {
+        postListProvider?.saveLastPost(post.linkid);
+        await openAndShowPost(context, client, String(post.linkid));
+    });
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(FeedViewProvider.viewType, feedViewProvider),
+        feedViewProvider,
+    );
+
     // 创建帖子列表树视图
     const treeView = vscode.window.createTreeView("heybox.postList", {
         treeDataProvider: postListProvider, showCollapseAll: true,
@@ -101,7 +112,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 });
             }
         }
-    }, (url) => client.getOriginalImageUrl(url), openOriginalImagePreview);
+    }, (url) => client.getOriginalImageUrl(url), openOriginalImagePreview,
+    (linkId, loadAll, sortFilter) => void openAndShowPost(context, client, linkId, loadAll, undefined, sortFilter),
+    (linkId) => void openAndShowPost(context, client, linkId));
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
     // 应用隐身模式设置
@@ -120,7 +133,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // ─── 命令注册 ───
 
     // 刷新帖子列表，重新加载配置
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", async () => { await client.loadConfig(); postListProvider!.refresh(); }));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", async () => {
+        await client.loadConfig();
+        postListProvider!.refresh();
+        await feedViewProvider?.refresh();
+    }));
 
     // 搜索帖子 — 弹出输入框输入关键词，执行搜索
     context.subscriptions.push(vscode.commands.registerCommand("heybox.searchPost", async () => {
@@ -153,7 +170,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFeed", async () => postListProvider!.loadMoreFeed()));
 
     // 加载更多云端收藏或某一类消息
-    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFavourites", async () => postListProvider!.loadMoreFavourites()));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreFavourites", async (folderId?: string) => postListProvider!.loadMoreFavourites(folderId)));
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreMessages", async (section: "comment" | "award" | "follow" | "mention" | "official" | "discount") => postListProvider!.loadMoreMessages(section)));
 
     // 开启/关闭消息提醒 — 切换轮询状态
@@ -282,7 +299,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 监听配置变更，自动刷新并重新应用设置
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (e) => {
-        if (e.affectsConfiguration("heybox")) { await client.loadConfig(); applyStealthMode(); postListProvider!.refresh(); }
+        if (e.affectsConfiguration("heybox")) { await client.loadConfig(); applyStealthMode(); postListProvider!.refresh(); await feedViewProvider?.refresh(); }
     }));
 }
 
@@ -332,10 +349,10 @@ async function loadRepliesForPost(
     }
 }
 
-async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxClient, linkId: string, loadAll = false, rootId?: string): Promise<void> {
+async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxClient, linkId: string, loadAll = false, rootId?: string, sortFilter?: string): Promise<void> {
     try {
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "加载帖子中...", cancellable: false }, async () => {
-            const tree = await client.getPostTree(linkId, 0, loadAll ? 100 : 20);
+            const tree = await client.getPostTree(linkId, 0, loadAll ? 100 : 20, sortFilter);
             if (!tree || !tree.link) { vscode.window.showWarningMessage("未获取到帖子内容"); return; }
 
             // 记录浏览历史，最多保留 MAX_HISTORY 条，自动去重
@@ -373,7 +390,7 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             if (loadAll && totalCommentNum > allCommentGroups.length) {
                 let offset = allCommentGroups.length;
                 while (offset < totalCommentNum) {
-                    const page = await client.getPostTree(linkId, offset, 100);
+                    const page = await client.getPostTree(linkId, offset, 100, sortFilter);
                     if (!page.comments?.length) { stoppedByEmpty = true; break; }
                     allCommentGroups.push(...page.comments);
                     offset += page.comments.length;
@@ -381,7 +398,18 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             }
 
             // 组装完整帖子树，根据设置选择在侧边栏或面板中展示
-            const fullTree: PostTreeResult = { ...tree, comments: allCommentGroups };
+            const [relatedResult, permissionResult] = await Promise.allSettled([
+                client.getRelatedRecommendations(linkId),
+                client.getUserPermission(linkId),
+            ]);
+            const fullTree: PostTreeResult = {
+                ...tree,
+                comments: allCommentGroups,
+                readonly_meta: {
+                    related: relatedResult.status === "fulfilled" ? relatedResult.value : [],
+                    permission: permissionResult.status === "fulfilled" ? permissionResult.value : undefined,
+                },
+            };
             const location = vscode.workspace.getConfiguration("heybox").get<string>("postDetailLocation", "sidebar");
             const stealth = isStealthMode();
             const loadedCount = allCommentGroups.reduce((sum, g) => sum + (g.comment?.length || 0), 0);
@@ -404,6 +432,14 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
                 panel.webview.onDidReceiveMessage((msg) => {
                     if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) {
                         void loadOriginalImage(client, panel.webview, msg.url);
+                        return;
+                    }
+                    if (msg?.command === "reloadComments" && typeof msg.linkId === "string") {
+                        void openAndShowPost(context, client, msg.linkId, msg.loadAll === true, undefined, typeof msg.sortFilter === "string" ? msg.sortFilter : undefined);
+                        return;
+                    }
+                    if (msg?.command === "openRelated" && typeof msg.linkId === "string") {
+                        void openAndShowPost(context, client, msg.linkId);
                         return;
                     }
                     if (msg?.command !== "loadReplies" || typeof msg.linkId !== "string" || typeof msg.rootId !== "string") return;
@@ -705,6 +741,7 @@ function applyStealthMode(): void {
  */
 export function deactivate(): void {
     postListProvider?.dispose();
+    feedViewProvider?.dispose();
     activeClient?.dispose();
     activeClient = undefined;
     if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }

@@ -164,6 +164,11 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     const contentHtml = renderContent(link.text || link.description || "");
 
     const commentGroups = postTree.comments || [];
+    const related = postTree.readonly_meta?.related || [];
+    const permission = postTree.readonly_meta?.permission;
+    const sortOptions = (postTree.sort_filter || []).filter((option) => option?.key).map((option) =>
+        `<option value="${escHtml(option.key)}"${option.selected ? " selected" : ""}>${escHtml(option.text || option.name || option.label || option.key)}</option>`,
+    ).join("");
     const commentsHtml = commentGroups.map((g) => {
         if (!g.comment || g.comment.length === 0) return "";
         const main = renderCommentHtml(g.comment[0], false, stealth);
@@ -183,6 +188,13 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
         return `<section class="cg" aria-label="评论组">${main}${subs}${more}</section>`;
     }).join("");
 
+    const relatedHtml = related.slice(0, 8).map((post) => `<button class="related-card" data-link="${escHtml(post.linkid)}"><strong>${escHtml(post.title || "无标题")}</strong><span>👍 ${post.up || 0} · 💬 ${post.comment_num || 0}</span></button>`).join("");
+    const capabilities = permission ? [
+        permission.can_comment ? "可评论" : "不可评论",
+        permission.can_delete ? "可删除" : "",
+        permission.can_award ? "可打赏" : "",
+    ].filter(Boolean).join(" · ") : "";
+
     const themeOverrides = getThemeOverrides();
     const rootStyle = themeOverrides ? ` style="${themeOverrides}"` : "";
 
@@ -199,6 +211,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     main{flex:1;overflow-y:auto;padding:16px 24px}
     .ctrl label{white-space:nowrap}
     .ctrl input{flex:1;max-width:160px;accent-color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer}
+    .comment-tools{display:flex;gap:6px;align-items:center;margin:0 0 12px;flex-wrap:wrap}.comment-tools button,.comment-tools select{border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--fg);padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}.capabilities{margin-left:auto;color:var(--dim);font-size:11px}
     h1{font-size:22px;font-weight:700;margin-bottom:10px}
     .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
     .tags{font-size:12px;color:var(--dim);margin-bottom:8px}
@@ -222,6 +235,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .loadReplies:focus-visible{outline:1px solid var(--vscode-focusBorder,#3794ff);outline-offset:1px}
     .loadReplies:disabled{opacity:.65;cursor:wait}
     .ftr{text-align:center;font-size:12px;color:var(--dim);padding:16px 0 8px}
+    .related{border-top:1px solid var(--border);margin-top:18px;padding-top:14px}.related-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:7px}.related-card{display:flex;flex-direction:column;gap:4px;text-align:left;border:1px solid var(--border);border-radius:5px;background:var(--input-bg);color:var(--fg);padding:8px;font:inherit;cursor:pointer}.related-card:hover{background:var(--badge-bg);color:var(--badge-fg)}.related-card span{font-size:11px;color:var(--dim)}
     .image-viewer{position:fixed;z-index:10;inset:0;display:none;flex-direction:column;background:var(--bg)}
     .image-viewer.open{display:flex}
     .image-toolbar{display:flex;align-items:center;gap:6px;padding:8px;border-bottom:1px solid var(--border);flex-shrink:0}
@@ -242,13 +256,16 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     </article>
     <section aria-label="评论区">
     <h2 class="ch">💬 评论 (${commentCount})</h2>
+    <div class="comment-tools">${sortOptions ? `<label for="commentSort">排序</label><select id="commentSort"><option value="">默认</option>${sortOptions}</select><button id="applySort">应用</button>` : ""}<button id="loadAllComments">加载全部评论</button>${capabilities ? `<span class="capabilities">${escHtml(capabilities)}</span>` : ""}</div>
     ${commentsHtml || (foldedTips ? `<p style="color:var(--dim);font-size:12px">评论已被折叠: ${escHtml(foldedTips)}</p>` : '<p style="color:var(--dim);font-size:12px">暂无评论</p>')}
     ${commentNote ? `<div class="ftr" style="font-style:italic">${escHtml(commentNote)}</div>` : `<div class="ftr">${commentCount} 条评论${foldedTips ? '（已折叠）' : ''}</div>`}
     </section>
+    ${relatedHtml ? `<section class="related" aria-label="相关推荐"><h2 class="ch">相关推荐</h2><div class="related-grid">${relatedHtml}</div></section>` : ""}
     </main>
     <section id="imageViewer" class="image-viewer" aria-label="图片查看器" aria-hidden="true"><div class="image-toolbar"><button id="closeImage" title="关闭图片查看器">关闭</button><button id="loadOriginal">加载原图</button><span id="imageStatus" class="image-status">当前为展示图</span></div><div id="imageStage" class="image-stage"><img id="viewerImage" alt="帖子图片"></div></section>
 <script>
 (function(){
+var vscode=acquireVsCodeApi();
 var s=document.getElementById('s'),l=document.getElementById('sl'),r=document.documentElement;
 var v=localStorage.getItem('hb_img');if(v){s.value=v;r.style.setProperty('--scale',v/100);l.textContent=v+'%'}else l.textContent='30%';
 s.addEventListener('input',function(){var v=this.value;r.style.setProperty('--scale',v/100);l.textContent=v+'%';localStorage.setItem('hb_img',v)});
@@ -263,9 +280,14 @@ var viewer=document.getElementById('imageViewer'),viewerImage=document.getElemen
 function closeImage(){viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');}
 document.addEventListener('click',function(e){var t=e.target;if(t.tagName==='IMG'&&t.matches('.body img,.cimg')){imageSource=t.currentSrc||t.src;viewerImage.src=imageSource;viewerImage.alt=t.alt||'帖子图片';imageStatus.textContent='当前为展示图';loadOriginal.disabled=false;loadOriginal.textContent='加载原图';viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');imageStage.scrollTop=0;imageStage.scrollLeft=0;}});
 document.getElementById('closeImage').addEventListener('click',closeImage);document.addEventListener('keydown',function(e){if(e.key==='Escape')closeImage()});
-loadOriginal.addEventListener('click',function(){if(!imageSource)return;loadOriginal.disabled=true;loadOriginal.textContent='正在加载…';imageStatus.textContent='正在请求原图…';acquireVsCodeApi().postMessage({command:'loadOriginalImage',url:imageSource});});
+loadOriginal.addEventListener('click',function(){if(!imageSource)return;loadOriginal.disabled=true;loadOriginal.textContent='正在加载…';imageStatus.textContent='正在请求原图…';vscode.postMessage({command:'loadOriginalImage',url:imageSource});});
 window.addEventListener('message',function(event){var data=event.data||{};if(data.command==='originalImageOpened'&&viewer.classList.contains('open')){closeImage();return}if(data.command==='originalImage'&&viewer.classList.contains('open')){viewerImage.src=data.url;loadOriginal.textContent='已加载原图';imageStatus.textContent='正在显示原图';return}if(data.command==='originalImageError'&&viewer.classList.contains('open')){loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';imageStatus.textContent='原图加载失败：'+(data.message||'未知错误')}});
-document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';acquireVsCodeApi().postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});
+document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';vscode.postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});
+var commentSort=document.getElementById('commentSort'),applySort=document.getElementById('applySort'),loadAllComments=document.getElementById('loadAllComments');
+if(commentSort){var savedSort=sessionStorage.getItem('hb_comment_sort');if(savedSort&&Array.from(commentSort.options).some(function(o){return o.value===savedSort}))commentSort.value=savedSort;}
+if(applySort)applySort.addEventListener('click',function(){applySort.disabled=true;applySort.textContent='加载中…';sessionStorage.setItem('hb_comment_sort',commentSort.value);vscode.postMessage({command:'reloadComments',linkId:'${escHtml(String(link.linkid))}',sortFilter:commentSort.value,loadAll:false});});
+loadAllComments.addEventListener('click',function(){loadAllComments.disabled=true;loadAllComments.textContent='加载中…';var sort=commentSort?commentSort.value:'';sessionStorage.setItem('hb_comment_sort',sort);vscode.postMessage({command:'reloadComments',linkId:'${escHtml(String(link.linkid))}',sortFilter:sort,loadAll:true});});
+document.querySelectorAll('.related-card').forEach(function(b){b.addEventListener('click',function(){vscode.postMessage({command:'openRelated',linkId:b.getAttribute('data-link')});});});
 })();
 </script>
 </body></html>`;

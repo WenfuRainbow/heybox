@@ -112,6 +112,10 @@ export interface PostTreeResult {
     comments: CommentGroup[];
     /** 是否还有更多楼层（分页标识） */
     has_more_floors: number;
+    /** 由扩展额外读取的相关推荐与当前用户权限。 */
+    readonly_meta?: PostReadonlyMeta;
+    /** 服务端返回的评论排序选项；key 应原样回传为 sort_filter。 */
+    sort_filter?: Array<{ key: string; text?: string; name?: string; label?: string; selected?: boolean }>;
 }
 
 /** API 通用响应包装 */
@@ -143,6 +147,10 @@ export interface SearchItemInfo {
     down: number;
     topics: Topic[];
     has_video: number;
+    /** 列表接口可能附带作者和封面；旧接口不保证存在。 */
+    user?: Partial<User>;
+    pics?: PostImage[];
+    imgs?: Array<PostImage | string>;
 }
 
 /** 搜索结果条目包装 */
@@ -230,6 +238,53 @@ export interface FavouriteLinkItem {
 export interface FavouriteLinksResult {
     links?: FavouriteLinkItem[];
     has_next?: string | number | boolean;
+}
+
+/** 首页社区横幅中的统一社区模型。 */
+export interface CommunitySummary {
+    topic_id: number;
+    name: string;
+    pic_url?: string;
+    description?: string;
+    followed?: boolean;
+}
+
+export interface CommunityBannerResult {
+    followed: CommunitySummary[];
+    popular: CommunitySummary[];
+}
+
+/** 搜索欢迎页中的热搜或建议词。 */
+export interface SearchSuggestion {
+    text: string;
+    rank?: number;
+    hot?: string;
+}
+
+export interface SearchWelcomeResult {
+    hot: SearchSuggestion[];
+    suggestions: SearchSuggestion[];
+}
+
+/** 服务端收藏夹；folder_id 会因接口版本而为数字或字符串。 */
+export interface FavouriteFolder {
+    folder_id: string;
+    name: string;
+    count?: number;
+    is_default?: boolean;
+}
+
+/** 当前用户对帖子具有的操作权限。这里只保存只读布尔能力。 */
+export interface UserPermission {
+    can_comment: boolean;
+    can_delete: boolean;
+    can_award: boolean;
+}
+
+/** 详情页相关内容和操作权限，由扩展在读取多个只读接口后附加。 */
+export interface PostReadonlyMeta {
+    related?: SearchItemInfo[];
+    permission?: UserPermission;
 }
 
 /** 官方消息支持富文本标题、跳转协议和缩略图，字段会随消息类别变化。 */

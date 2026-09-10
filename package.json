@@ -2,7 +2,7 @@
   "name": "heybox-forum",
   "displayName": "HeyBox Forum",
   "description": "在 VSCode 中浏览小黑盒论坛帖子和评论，支持隐身模式",
-  "version": "0.1.16",
+  "version": "0.2.0",
   "publisher": "kyo",
   "icon": "resources/icon.png",
   "engines": {
@@ -12,6 +12,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:heybox.feed",
     "onView:heybox.postList",
     "onCommand:heybox.refreshList",
     "onCommand:heybox.searchPost",
@@ -51,8 +52,15 @@
     "views": {
       "heybox": [
         {
+          "id": "heybox.feed",
+          "name": "富内容列表",
+          "type": "webview",
+          "when": "!config.heybox.stealthMode && !config.heybox.minimalMode"
+        },
+        {
           "id": "heybox.postList",
-          "name": "帖子列表"
+          "name": "帖子列表",
+          "when": "config.heybox.stealthMode || config.heybox.minimalMode"
         },
         {
           "id": "heybox.postDetail",
@@ -70,32 +78,32 @@
         },
         {
           "command": "heybox.refreshList",
-          "when": "view == heybox.postList || view == heybox.postDetail",
+          "when": "view == heybox.postList || view == heybox.postDetail || view == heybox.feed",
           "group": "navigation"
         },
         {
           "command": "heybox.toggleNotifications",
-          "when": "view == heybox.postList",
+          "when": "view == heybox.postList || view == heybox.feed",
           "group": "navigation"
         },
         {
           "command": "heybox.markAllRead",
-          "when": "view == heybox.postList",
+          "when": "view == heybox.postList || view == heybox.feed",
           "group": "navigation"
         },
         {
           "command": "heybox.login",
-          "when": "view == heybox.postList",
+          "when": "view == heybox.postList || view == heybox.feed",
           "group": "navigation"
         },
         {
           "command": "heybox.logout",
-          "when": "view == heybox.postList",
+          "when": "view == heybox.postList || view == heybox.feed",
           "group": "navigation"
         },
         {
           "command": "heybox.switchTheme",
-          "when": "view == heybox.postList",
+          "when": "view == heybox.postList || view == heybox.feed",
           "group": "navigation"
         }
       ],
@@ -395,7 +403,7 @@
     "package": "npm run compile && npx @vscode/vsce package",
     "watch": "tsc -watch -p ./",
     "lint": "eslint \"src/**/*.ts\"",
-    "test:unit": "node --test out/api/__tests__/requestPolicy.test.js out/api/__tests__/responseContract.test.js out/api/__tests__/signature.test.js",
+    "test:unit": "node --test --test-isolation=none out/api/__tests__/normalizers.test.js out/api/__tests__/requestPolicy.test.js out/api/__tests__/responseContract.test.js out/api/__tests__/signature.test.js",
     "test": "npm run compile && npm run lint && npm run test:unit"
   },
   "devDependencies": {

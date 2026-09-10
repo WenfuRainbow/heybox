@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { HeyBoxClient } from "../api/client";
-import { DiscountMessageItem, MessageItem, OfficialMessageItem, SearchItemInfo, TopicChild } from "../types";
+import { DiscountMessageItem, FavouriteFolder, MessageItem, OfficialMessageItem, SearchItemInfo, TopicChild } from "../types";
 
 /** 视图模式：推荐流 / 板块分类 / 云端收藏 / 消息中心 */
 type ViewMode = "recommend" | "categories" | "favorites" | "messages";
@@ -106,12 +106,13 @@ export class PostListProvider
     /** 帖子收藏数缓存，key = linkid, value = favour_count */
     private favCache: Map<number, number> = new Map();
 
-    /** 服务端默认收藏夹，首次进入收藏页时按需读取。 */
-    private favouritePosts: SearchItemInfo[] = [];
-    private favouriteOffset = 0;
-    private favouritesLoaded = false;
-    private favouritesHasMore = true;
-    private favouritesLoading = false;
+    /** 服务端实际收藏夹及各收藏夹独立分页状态。 */
+    private favouriteFolders: FavouriteFolder[] = [];
+    private favouritePosts = new Map<string, SearchItemInfo[]>();
+    private favouriteOffsets = new Map<string, number>();
+    private favouritesLoaded = new Set<string>();
+    private favouritesHasMore = new Map<string, boolean>();
+    private favouritesLoading = new Set<string>();
 
     /** 消息中心的六个分页流，避免切换分类时重复请求。 */
     private readonly messagePages = new Map<MessageSection, MessagePageState>();
@@ -158,10 +159,12 @@ export class PostListProvider
         this.feedPosts = [];
         this.feedOffset = 0;
         this.favCache.clear();
-        this.favouritePosts = [];
-        this.favouriteOffset = 0;
-        this.favouritesLoaded = false;
-        this.favouritesHasMore = true;
+        this.favouriteFolders = [];
+        this.favouritePosts.clear();
+        this.favouriteOffsets.clear();
+        this.favouritesLoaded.clear();
+        this.favouritesHasMore.clear();
+        this.favouritesLoading.clear();
         this.messagePages.clear();
         this._onDidChangeTreeData.fire();
     }
@@ -254,12 +257,16 @@ export class PostListProvider
                 tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
                 tabs.push(new LoadMoreFeedItem());
             } else if (this.viewMode === "favorites") {
-                if (!this.favouritesLoaded && !this.favouritesLoading) await this.fetchFavourites();
-                if (this.favouritePosts.length === 0) {
-                    tabs.push(new TabEmptyItem("暂无云端收藏"));
-                } else {
-                    tabs.push(...this.favouritePosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
-                    if (this.favouritesHasMore) tabs.push(new LoadMoreFavouritesItem());
+                if (!this.favouriteFolders.length) await this.fetchFavouriteFolders();
+                if (this.favouriteFolders.length) tabs.push(...this.favouriteFolders.map((folder) => new FavouriteFolderItem(folder)));
+                else {
+                    await this.fetchFavourites();
+                    const posts = this.favouritePosts.get("") || [];
+                    if (!posts.length) tabs.push(new TabEmptyItem("暂无云端收藏"));
+                    else {
+                        tabs.push(...posts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
+                        if (this.favouritesHasMore.get("")) tabs.push(new LoadMoreFavouritesItem());
+                    }
                 }
             } else if (this.viewMode === "messages") {
                 tabs.push(...MESSAGE_SECTIONS.map((section) => new MessageSectionItem(section)));
@@ -277,6 +284,16 @@ export class PostListProvider
             if (!this.topicPosts.has(tid)) await this.fetchTopicPosts(tid);
             const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache));
             items.push(new LoadMoreTopicItem(tid));
+            return items;
+        }
+        if (element instanceof FavouriteFolderItem) {
+            const folderId = element.folder.folder_id;
+            if (!this.favouritesLoaded.has(folderId)) await this.fetchFavourites(folderId);
+            const posts = this.favouritePosts.get(folderId) || [];
+            const items: TreeItemBase[] = posts.length
+                ? posts.map((post) => new PostItem(post, vscode.TreeItemCollapsibleState.None, this.favCache))
+                : [new TabEmptyItem("收藏夹为空")];
+            if (this.favouritesHasMore.get(folderId)) items.push(new LoadMoreFavouritesItem(folderId));
             return items;
         }
         if (element instanceof MessageSectionItem) {
@@ -349,28 +366,39 @@ export class PostListProvider
         this.fetchFavCounts(this.topicPosts.get(topicId) || []);
     }
 
-    /** 分页读取云端默认收藏夹；网络失败时保留旧版本地缓存作为离线兜底。 */
-    private async fetchFavourites(): Promise<void> {
-        if (this.favouritesLoading || !this.favouritesHasMore) return;
-        this.favouritesLoading = true;
+    private async fetchFavouriteFolders(): Promise<void> {
         try {
-            const page = await this.client.getFavouriteLinks(this.favouriteOffset, 30);
-            const known = new Set(this.favouritePosts.map((post) => post.linkid));
+            this.favouriteFolders = await this.client.getFavouriteFolders();
+        } catch (e) {
+            vscode.window.showErrorMessage(`获取收藏夹失败: ${(e as Error).message}`);
+        }
+    }
+
+    /** 分页读取指定云端收藏夹；网络失败时保留旧版本地缓存作为离线兜底。 */
+    private async fetchFavourites(folderId = ""): Promise<void> {
+        if (this.favouritesLoading.has(folderId) || this.favouritesHasMore.get(folderId) === false) return;
+        this.favouritesLoading.add(folderId);
+        try {
+            const posts = this.favouritePosts.get(folderId) || [];
+            const offset = this.favouriteOffsets.get(folderId) || 0;
+            const page = await this.client.getFavouriteLinks(offset, 30, folderId || undefined);
+            const known = new Set(posts.map((post) => post.linkid));
             const added = page.links.filter((post) => !known.has(post.linkid));
-            this.favouritePosts.push(...added);
-            this.favouriteOffset += page.links.length;
-            this.favouritesHasMore = page.hasMore && added.length > 0;
-            this.favouritesLoaded = true;
+            posts.push(...added);
+            this.favouritePosts.set(folderId, posts);
+            this.favouriteOffsets.set(folderId, offset + page.links.length);
+            this.favouritesHasMore.set(folderId, page.hasMore && added.length > 0);
+            this.favouritesLoaded.add(folderId);
             this.fetchFavCounts(added);
         } catch (e) {
-            if (!this.favouritesLoaded) {
-                this.favouritePosts = getFavs(this.client.getContext());
-                this.favouritesHasMore = false;
-                this.favouritesLoaded = true;
+            if (!this.favouritesLoaded.has(folderId)) {
+                this.favouritePosts.set(folderId, folderId ? [] : getFavs(this.client.getContext()));
+                this.favouritesHasMore.set(folderId, false);
+                this.favouritesLoaded.add(folderId);
             }
             vscode.window.showErrorMessage(`获取云端收藏失败: ${(e as Error).message}`);
         } finally {
-            this.favouritesLoading = false;
+            this.favouritesLoading.delete(folderId);
         }
     }
 
@@ -489,8 +517,8 @@ export class PostListProvider
     }
 
     /** 加载更多云端收藏。 */
-    async loadMoreFavourites(): Promise<void> {
-        await this.fetchFavourites();
+    async loadMoreFavourites(folderId = ""): Promise<void> {
+        await this.fetchFavourites(folderId);
         this._onDidChangeTreeData.fire();
     }
 
@@ -502,11 +530,12 @@ export class PostListProvider
 
     /** 收藏操作完成后丢弃服务端缓存并重新读取。 */
     async refreshFavourites(): Promise<void> {
-        this.favouritePosts = [];
-        this.favouriteOffset = 0;
-        this.favouritesLoaded = false;
-        this.favouritesHasMore = true;
-        if (this.viewMode === "favorites") await this.fetchFavourites();
+        this.favouriteFolders = [];
+        this.favouritePosts.clear();
+        this.favouriteOffsets.clear();
+        this.favouritesLoaded.clear();
+        this.favouritesHasMore.clear();
+        if (this.viewMode === "favorites") await this.fetchFavouriteFolders();
         this._onDidChangeTreeData.fire();
     }
 }
@@ -568,6 +597,16 @@ export class TopicItem extends TreeItemBase {
     }
 }
 
+/** 简约/隐身 TreeView 中的真实云端收藏夹。 */
+export class FavouriteFolderItem extends TreeItemBase {
+    constructor(public readonly folder: FavouriteFolder) {
+        super(folder.name, vscode.TreeItemCollapsibleState.Collapsed);
+        this.description = folder.count === undefined ? "" : String(folder.count);
+        this.contextValue = "favouriteFolder";
+        this.iconPath = new vscode.ThemeIcon(folder.is_default ? "star-full" : "folder");
+    }
+}
+
 /** 帖子树节点，显示标题、收藏数和评论数，点击打开帖子详情 */
 export class PostItem extends TreeItemBase {
     public readonly post: SearchItemInfo;
@@ -626,9 +665,9 @@ export class LoadMoreFeedItem extends TreeItemBase {
 
 /** 收藏页的分页入口。 */
 export class LoadMoreFavouritesItem extends TreeItemBase {
-    constructor() {
+    constructor(folderId = "") {
         super("加载更多收藏...", vscode.TreeItemCollapsibleState.None);
-        this.command = { command: "heybox.loadMoreFavourites", title: "加载更多收藏" };
+        this.command = { command: "heybox.loadMoreFavourites", title: "加载更多收藏", arguments: [folderId] };
         this.contextValue = "loadMoreFavourites";
         this.iconPath = new vscode.ThemeIcon("more-horizontal");
     }

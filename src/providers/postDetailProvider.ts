@@ -16,9 +16,11 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
 
     constructor(
         private readonly extensionUri: vscode.Uri,
-        private readonly onLoadAll?: (linkId: string, rootId?: string) => void,
+        private readonly onLoadReplies?: (linkId: string, rootId: string) => void,
         private readonly onRequestOriginalImage?: (url: string) => Promise<string>,
         private readonly onOpenOriginalImage?: (url: string) => void,
+        private readonly onReloadComments?: (linkId: string, loadAll: boolean, sortFilter?: string) => void,
+        private readonly onOpenPost?: (linkId: string) => void,
     ) {}
 
     /**
@@ -30,8 +32,12 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
         this._view = webviewView;
         webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
         webviewView.webview.onDidReceiveMessage((msg) => {
-            if (msg?.command === "loadReplies" && typeof msg.linkId === "string") this.onLoadAll?.(msg.linkId, msg.rootId);
+            if (msg?.command === "loadReplies" && typeof msg.linkId === "string" && typeof msg.rootId === "string") this.onLoadReplies?.(msg.linkId, msg.rootId);
             if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) void this.loadOriginalImage(msg.url);
+            if (msg?.command === "reloadComments" && typeof msg.linkId === "string") {
+                this.onReloadComments?.(msg.linkId, msg.loadAll === true, typeof msg.sortFilter === "string" ? msg.sortFilter : undefined);
+            }
+            if (msg?.command === "openRelated" && typeof msg.linkId === "string") this.onOpenPost?.(msg.linkId);
         });
         webviewView.title = getPanelTitle();
         if (this._currentPost) {
