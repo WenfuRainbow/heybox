@@ -156,10 +156,12 @@ function launchErrorDetail(error: unknown): string {
 export class BrowserNetworkClient {
     private browser?: Browser;
     private authPage?: Page;
+    private authPagePromise?: Promise<Page>;
     private launchPromise?: Promise<Browser>;
     private lastAuthCookie = "";
     private proxy = "";
     private browserPath = "";
+    private lifecycleGeneration = 0;
 
     configure(options: BrowserNetworkOptions): void {
         const proxy = options.proxy?.trim() || "";
@@ -167,6 +169,7 @@ export class BrowserNetworkClient {
         if (proxy === this.proxy && browserPath === this.browserPath) return;
         this.proxy = proxy;
         this.browserPath = browserPath;
+        this.lifecycleGeneration++;
         void this.dispose();
     }
 
@@ -190,8 +193,8 @@ export class BrowserNetworkClient {
 
     private async requestAnonymous(browser: Browser, options: BrowserRequestOptions): Promise<BrowserHttpResult> {
         const context = await browser.createBrowserContext();
-        const page = await context.newPage();
         try {
+            const page = await context.newPage();
             await this.loadBootstrap(page);
             const cookieHeader = options.cookie ?? "";
             if (cookieHeader.trim()) await applyCookies(page, cookieHeader);
@@ -210,11 +213,13 @@ export class BrowserNetworkClient {
     }
 
     async dispose(): Promise<void> {
+        this.lifecycleGeneration++;
         const browser = this.browser;
         const launchPromise = this.launchPromise;
         this.browser = undefined;
         this.launchPromise = undefined;
         this.authPage = undefined;
+        this.authPagePromise = undefined;
         this.lastAuthCookie = "";
         if (launchPromise) {
             launchPromise.then((value) => value.close()).catch(() => undefined);
@@ -254,7 +259,14 @@ export class BrowserNetworkClient {
             "--disable-blink-features=AutomationControlled",
             ...(this.proxy ? [`--proxy-server=${this.proxy}`] : []),
         ];
-        this.launchPromise = this.launchBrowserCandidate(candidates, args).catch((error) => {
+        const lifecycle = this.lifecycleGeneration;
+        this.launchPromise = this.launchBrowserCandidate(candidates, args).then(async (browser) => {
+            if (lifecycle !== this.lifecycleGeneration) {
+                await browser.close().catch(() => undefined);
+                throw new Error("浏览器初始化已取消");
+            }
+            return browser;
+        }).catch((error) => {
             this.launchPromise = undefined;
             throw error;
         });
@@ -291,11 +303,27 @@ export class BrowserNetworkClient {
 
     private async getAuthPage(browser: Browser): Promise<Page> {
         if (this.authPage && !this.authPage.isClosed()) return this.authPage;
-        const page = await browser.newPage();
-        await this.loadBootstrap(page);
-        this.authPage = page;
-        this.lastAuthCookie = "";
-        return page;
+        if (this.authPagePromise) return this.authPagePromise;
+        const lifecycle = this.lifecycleGeneration;
+        this.authPagePromise = (async () => {
+            let page: Page | undefined;
+            try {
+                page = await browser.newPage();
+                await this.loadBootstrap(page);
+                if (lifecycle !== this.lifecycleGeneration || this.browser !== browser) {
+                    throw new Error("浏览器初始化已取消");
+                }
+                this.authPage = page;
+                this.lastAuthCookie = "";
+                return page;
+            } catch (error) {
+                await page?.close().catch(() => undefined);
+                throw error;
+            } finally {
+                this.authPagePromise = undefined;
+            }
+        })();
+        return this.authPagePromise;
     }
 
     private async loadBootstrap(page: Page): Promise<void> {

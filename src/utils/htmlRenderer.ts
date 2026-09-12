@@ -158,6 +158,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     const hasMoreComments = Number(postTree.has_more_floors) > 0 || (typeof postTree.has_more_floors !== "number" && commentGroups.length < commentCount);
 
     const themeOverrides = getThemeOverrides();
+    // 显式主题配置必须位于 VS Code 变量默认值之后，才能真正覆盖默认主题。
     const themeCss = themeOverrides ? `:root{${themeOverrides}}` : "";
     const nonce = scriptNonce();
 
@@ -165,8 +166,9 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
 <html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
-<style nonce="${nonce}">${themeCss}
+<style nonce="${nonce}">
     :root{--bg:var(--vscode-editor-background,#1e1e1e);--fg:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#9d9d9d);--border:var(--vscode-panel-border,#333);--badge-bg:var(--vscode-badge-background,#4d4d4d);--badge-fg:var(--vscode-badge-foreground,#fff);--input-bg:var(--vscode-input-background,#3c3c3c);--font:var(--vscode-font-family);--fs:var(--vscode-font-size,13px);--scale:.3}
+    ${themeCss}
     *{margin:0;padding:0;box-sizing:border-box}
     html,body{height:100%;overflow:hidden}
     body{font-family:var(--font);font-size:var(--fs);background:var(--bg);color:var(--fg);line-height:1.6;display:flex;flex-direction:column}
@@ -180,7 +182,6 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .ctrl label{white-space:nowrap}
     .ctrl input{flex:1;max-width:160px;accent-color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer}
     .ctrl-hint{white-space:nowrap}
-    @media (max-width:480px){.post-toolbar{gap:4px;padding:6px 12px}.post-toolbar button{padding:4px 5px}.post-toolbar button span{display:none}.reading-settings>div{right:0}.ctrl{gap:6px}.ctrl-hint{display:none}main{padding:12px}.cm{gap:7px}.cm.sub{margin-left:20px}.loadReplies,.loadMoreComments{margin-left:20px}h1{font-size:19px}}
     h1{font-size:22px;font-weight:700;margin-bottom:10px}
     .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
     .tags{font-size:12px;color:var(--dim);margin-bottom:8px}
@@ -213,6 +214,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .image-status{margin-left:auto;color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .image-stage{flex:1;overflow:auto;padding:12px}
     .image-stage img{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;border-radius:6px}
+    @media (max-width:480px){.post-toolbar{gap:4px;padding:6px 12px}.post-toolbar button{padding:4px 5px}.post-toolbar button span{display:none}.reading-settings>div{right:0}.ctrl{gap:6px}.ctrl-hint{display:none}main{padding:12px}.cm{gap:7px}.cm.sub{margin-left:20px}.loadReplies,.loadMoreComments{margin-left:20px}h1{font-size:19px}}
 </style></head>
 <body>
     <header class="post-toolbar" aria-label="帖子操作"><button id="goBack" title="返回上一帖">← <span>返回</span></button><button id="goForward" title="前进到下一帖">→ <span>前进</span></button><button id="favourite" title="收藏或取消收藏">☆ <span>收藏</span></button><button id="copyLink" title="复制帖子链接">⌁ <span>复制链接</span></button><button id="openBrowser" title="在浏览器中打开原帖">↗ <span>原帖</span></button><button id="jumpComments" title="跳转到评论区">☷ <span>评论</span></button><details class="reading-settings"><summary>阅读设置</summary><div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span class="ctrl-hint">点击图片查看器</span></div></details></header>
@@ -237,7 +239,8 @@ var api=acquireVsCodeApi(),s=document.getElementById('s'),l=document.getElementB
 var v=localStorage.getItem('hb_img');if(v){s.value=v;r.style.setProperty('--scale',v/100);l.textContent=v+'%'}else {r.style.setProperty('--scale','.3');l.textContent='30%'};
 s.addEventListener('input',function(){var v=this.value;r.style.setProperty('--scale',v/100);l.textContent=v+'%';localStorage.setItem('hb_img',v)});
 
-document.getElementById('favourite').addEventListener('click',function(){this.disabled=true;this.textContent='正在同步…';api.postMessage({command:'toggleFavourite'});setTimeout(function(){var b=document.getElementById('favourite');if(b){b.disabled=false;b.innerHTML='☆ <span>收藏</span>';}},5000);});
+var favourite=document.getElementById('favourite');
+favourite.addEventListener('click',function(){favourite.disabled=true;favourite.textContent='正在同步…';api.postMessage({command:'toggleFavourite'});});
 document.getElementById('goBack').addEventListener('click',function(){api.postMessage({command:'goBack'});});
 document.getElementById('goForward').addEventListener('click',function(){api.postMessage({command:'goForward'});});
 document.getElementById('copyLink').addEventListener('click',function(){api.postMessage({command:'copyLink'});});
@@ -262,7 +265,7 @@ function closeImage(){if(!viewer.classList.contains('open'))return;viewer.classL
 document.addEventListener('click',function(e){var t=e.target;if(t.tagName==='IMG'&&t.matches('.body img,.cimg')){lastFocused=t;showImage(images().indexOf(t));viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');document.getElementById('closeImage').focus();}});
 document.getElementById('closeImage').addEventListener('click',closeImage);document.getElementById('previousImage').addEventListener('click',function(){showImage(imageIndex-1)});document.getElementById('nextImage').addEventListener('click',function(){showImage(imageIndex+1)});viewerImage.addEventListener('error',function(){imageStatus.textContent='图片加载失败，可切换图片或重试原图';loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';});document.addEventListener('keydown',function(e){if(!viewer.classList.contains('open'))return;if(e.key==='Escape'){e.preventDefault();closeImage()}else if(e.key==='ArrowLeft'){e.preventDefault();showImage(imageIndex-1)}else if(e.key==='ArrowRight'){e.preventDefault();showImage(imageIndex+1)}});
 loadOriginal.addEventListener('click',function(){if(!imageSource)return;loadOriginal.disabled=true;loadOriginal.textContent='正在加载…';imageStatus.textContent='正在请求原图…';api.postMessage({command:'loadOriginalImage',url:imageSource});});
-window.addEventListener('message',function(event){var data=event.data||{};if(data.command==='originalImageOpened'&&viewer.classList.contains('open')){closeImage();return}if(data.command==='originalImage'&&viewer.classList.contains('open')){viewerImage.src=data.url;loadOriginal.textContent='已加载原图';imageStatus.textContent='正在显示原图';return}if(data.command==='originalImageError'&&viewer.classList.contains('open')){loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';imageStatus.textContent='原图加载失败：'+(data.message||'未知错误')}});
+window.addEventListener('message',function(event){var data=event.data||{};if(data.command==='actionResult'&&data.action==='toggleFavourite'){favourite.disabled=false;favourite.innerHTML=data.success?'★ <span>已同步</span>':'☆ <span>收藏</span>';if(!data.success)favourite.title='收藏失败：'+(data.message||'未知错误');return}if(data.command==='originalImageOpened'&&viewer.classList.contains('open')){closeImage();return}if(data.command==='originalImage'&&viewer.classList.contains('open')){viewerImage.src=data.url;loadOriginal.textContent='已加载原图';imageStatus.textContent='正在显示原图';return}if(data.command==='originalImageError'&&viewer.classList.contains('open')){loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';imageStatus.textContent='原图加载失败：'+(data.message||'未知错误')}});
 document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';api.postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});
 document.querySelectorAll('.loadMoreComments').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';api.postMessage({command:'loadMoreComments',linkId:b.getAttribute('data-link')});});});
 })();

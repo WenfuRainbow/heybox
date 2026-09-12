@@ -60,6 +60,8 @@ export class HeyBoxClient {
     private browserPath: string = "";
     private browserNetwork?: BrowserNetworkClient;
     private readonly requestCoordinator = new RequestCoordinator();
+    /** 认证变更时递增；旧会话的迟到响应不得跨越这一边界。 */
+    private sessionGeneration = 0;
 
     constructor(private context: vscode.ExtensionContext) {}
 
@@ -69,6 +71,7 @@ export class HeyBoxClient {
      * 如果设备 ID 不存在则自动生成并存储
      */
     async loadConfig(): Promise<void> {
+        const previousCookie = this.cookie;
         const config = vscode.workspace.getConfiguration("heybox");
         this.heyboxId = config.get<string>("heyboxId", "");
         this.webVersion = config.get<string>("webVersion", "").trim();
@@ -81,15 +84,19 @@ export class HeyBoxClient {
         this.cookie = "";
         await this.refreshCookie();
         const configuredCookie = config.get<string>("cookie", "").trim();
-        if (!this.cookie && configuredCookie && this.validateCookie(configuredCookie)) {
+        const migrationBlocked = this.context.globalState.get<boolean>("heybox.legacyCookieMigrationBlocked", false);
+        if (!this.cookie && !migrationBlocked && configuredCookie && this.validateCookie(configuredCookie)) {
             this.cookie = configuredCookie;
             try {
                 await this.context.secrets.store("heybox.cookie", configuredCookie);
-                await config.update("cookie", "", vscode.ConfigurationTarget.Global);
+                await this.clearLegacyCookieSettings(config);
+                await this.context.globalState.update("heybox.legacyCookieMigrationBlocked", true);
             } catch {
                 // SecretStorage 不可用时仍可在本次会话使用兼容设置值。
             }
         }
+
+        if (previousCookie !== this.cookie) this.sessionGeneration++;
 
         const storedDeviceId = this.context.globalState.get<string>("deviceId");
         const configDeviceId = config.get<string>("deviceId", "");
@@ -101,6 +108,26 @@ export class HeyBoxClient {
             const m = this.cookie.match(/heybox_id=(\d+)/);
             if (m) this.heyboxId = m[1];
         }
+    }
+
+    /**
+     * 旧 Cookie 可能位于 Global、Workspace 或 WorkspaceFolder 配置层。
+     * 必须清除每个存在值的层级：只清除 Global 会让工作区配置在退出后
+     * 静默恢复登录态。
+     */
+    private async clearLegacyCookieSettings(config = vscode.workspace.getConfiguration("heybox")): Promise<void> {
+        // 兼容最小化的 ExtensionContext 测试替身。
+        if (typeof config.inspect !== "function") return;
+        const inspected = config.inspect<string>("cookie");
+        if (!inspected) return;
+        const targets: Array<[string | undefined, vscode.ConfigurationTarget]> = [
+            [inspected.globalValue, vscode.ConfigurationTarget.Global],
+            [inspected.workspaceValue, vscode.ConfigurationTarget.Workspace],
+            [inspected.workspaceFolderValue, vscode.ConfigurationTarget.WorkspaceFolder],
+        ];
+        await Promise.allSettled(targets
+            .filter(([value]) => typeof value === "string" && value.trim().length > 0)
+            .map(([, target]) => config.update("cookie", "", target)));
     }
 
     /**
@@ -363,12 +390,18 @@ export class HeyBoxClient {
         body: Record<string, string> | undefined,
         parse: (payload: unknown) => T,
     ): Promise<T> {
-        const key = this.requestKey(method, path, params, body);
+        this.requireCookie();
+        const cookie = this.cookie;
+        const generation = this.sessionGeneration;
+        const key = `${generation}:${this.requestKey(method, path, params, body)}`;
         try {
             // GET 是只读且可安全重试；POST 的幂等性未由服务端契约保证，
             // 因此只执行一次，调用者可重新发起明确的用户操作。
             return await this.requestCoordinator.execute(key, isSensitiveApiPath(path), async () => {
-                const payload = await this.requestJson(method, path, params, body);
+                const payload = await this.requestJson(method, path, params, body, cookie);
+                if (generation !== this.sessionGeneration || cookie !== this.cookie) {
+                    throw new HeyBoxApiError("authentication", "登录状态已变更，请重新执行操作");
+                }
                 return parse(payload);
             }, method === "GET");
         } catch (error) {
@@ -400,9 +433,10 @@ export class HeyBoxClient {
         path: string,
         params?: Record<string, string>,
         body?: Record<string, string>,
+        cookie = this.cookie,
     ): Promise<unknown> {
         if (this.shouldUseBrowserTransport()) {
-            return this.requestJsonViaBrowser(method, path, params, body);
+            return this.requestJsonViaBrowser(method, path, params, body, cookie);
         }
         return new Promise<unknown>((resolve, reject) => {
             let settled = false;
@@ -421,7 +455,7 @@ export class HeyBoxClient {
             try {
                 const url = this.buildUrl(path, params);
                 const headers = {
-                    ...this.buildHeaders(),
+                    ...this.buildHeaders(cookie),
                     ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" } : {}),
                 };
                 const onResponse = (res: import("http").IncomingMessage) => {
@@ -465,16 +499,17 @@ export class HeyBoxClient {
         path: string,
         params?: Record<string, string>,
         body?: Record<string, string>,
+        cookie = this.cookie,
     ): Promise<unknown> {
         const headers: Record<string, string> = {
-            ...this.buildHeaders(),
+            ...this.buildHeaders(cookie),
             ...(method === "POST" ? { "Content-Type": "application/x-www-form-urlencoded;charset=utf-8" } : {}),
         };
         const result = await this.getBrowserNetwork().request({
             method,
             url: this.buildUrl(path, params),
             headers,
-            cookie: this.cookie,
+            cookie,
             body: method === "POST" ? this.encodeFormBody(body || {}) : undefined,
         });
         if ((result.status || 200) >= 400) {
@@ -762,11 +797,15 @@ export class HeyBoxClient {
      * @param cookie 要保存的 cookie 字符串
      */
     async setCookie(cookie: string): Promise<void> {
-        this.cookie = cookie;
-        await this.context.secrets.store("heybox.cookie", cookie);
+        const nextCookie = cookie.trim();
+        if (!this.validateCookie(nextCookie)) throw new Error("Cookie 格式无效");
+        const changed = this.cookie !== nextCookie;
+        this.cookie = nextCookie;
+        if (changed) this.sessionGeneration++;
+        await this.context.secrets.store("heybox.cookie", nextCookie);
 
         // 从手动或扫码登录凭证中提取用户 ID，并覆盖可能已失效的旧账号 ID。
-        const m = cookie.match(/(?:heybox_id|user_heybox_id|heyboxid)=(\d+)/);
+        const m = nextCookie.match(/(?:heybox_id|user_heybox_id|heyboxid)=(\d+)/);
         if (m) {
             this.heyboxId = m[1];
             const config = vscode.workspace.getConfiguration("heybox");
@@ -797,11 +836,20 @@ export class HeyBoxClient {
      * 同时清除内存中的 cookie 和 SecretStorage 中的存储，并重置 heybox_id
      */
     async clearCookie(): Promise<void> {
+        const hadCookie = !!this.cookie;
         this.cookie = '';
         this.heyboxId = '';
-        await this.context.secrets.delete("heybox.cookie");
-
         const config = vscode.workspace.getConfiguration("heybox");
+        if (hadCookie) this.sessionGeneration++;
+        // 关闭隔离浏览器而不只是删除 Cookie，同时阻止退出前在途页面被
+        // 后续会话复用。
+        await this.browserNetwork?.dispose();
+        this.browserNetwork = undefined;
+        // 即使某个设置层无法重写（例如只读工作区），这个持久化屏障也会
+        // 阻止它在下次激活时被重新视为新凭证。
+        await this.context.globalState.update("heybox.legacyCookieMigrationBlocked", true);
+        await this.context.secrets.delete("heybox.cookie");
+        await this.clearLegacyCookieSettings(config);
         await config.update("heyboxId", "", vscode.ConfigurationTarget.Global);
     }
 
@@ -811,6 +859,10 @@ export class HeyBoxClient {
      */
     getCookie(): string {
         return this.cookie;
+    }
+
+    getSessionGeneration(): number {
+        return this.sessionGeneration;
     }
 
     /** 释放浏览器进程等资源；扩展停用时调用。 */

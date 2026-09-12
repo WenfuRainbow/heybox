@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { HeyBoxClient } from "../api/client";
 import { DiscountMessageItem, MessageItem, OfficialMessageItem, SearchItemInfo, TopicChild } from "../types";
+import { hasNextPage, isUnread } from "../utils/messageState";
 
 /** 视图模式：推荐流 / 板块分类 / 云端收藏 / 消息中心 */
 type ViewMode = "recommend" | "categories" | "favorites" | "messages";
@@ -98,7 +99,7 @@ export class PostListProvider
     private favouritesLoading = false;
     private favouritesError: string | undefined;
     /** 最近一次服务端收藏夹读取到的状态；本地缓存绝不作为展示依据。 */
-    private readonly serverFavouriteIds = new Set<number>();
+    private readonly serverFavouriteIds = new Set<string>();
     private favouritesStateComplete = false;
     private favouritesSync?: Promise<void>;
     private topicsError: string | undefined;
@@ -111,6 +112,8 @@ export class PostListProvider
     private treeView?: vscode.TreeView<TreeItemBase>;
     /** 已展开的话题 ID 集合，刷新后自动恢复展开状态 */
     private expandedTopics: Set<number> = new Set();
+    /** 刷新或切换账号后，使所有在途请求的写入结果失效。 */
+    private generation = 0;
 
     constructor(private client: HeyBoxClient) {}
 
@@ -142,6 +145,13 @@ export class PostListProvider
 
     /** 重置缓存并触发树刷新；搜索状态下保留关键词并重新搜索。 */
     refresh(): void {
+        this.generation++;
+        this.loadingTopics = false;
+        this.loadingTopicsSet.clear();
+        this.searchLoading = false;
+        this.feedLoading = false;
+        this.favouritesLoading = false;
+        this.favouritesSync = undefined;
         if (this.searchMode) {
             this.searchResults = [];
             this.searchOffset = 0;
@@ -178,6 +188,7 @@ export class PostListProvider
 
     /** 退出搜索模式，清空搜索状态 */
     exitSearch(): void {
+        this.generation++;
         this.searchMode = false;
         this.searchResults = [];
         this.searchQuery = "";
@@ -198,7 +209,9 @@ export class PostListProvider
      * @param query 搜索关键词
      */
     async performSearch(query: string): Promise<void> {
-        if (!query || this.searchLoading) return;
+        if (!query) return;
+        this.generation++;
+        this.searchLoading = false;
         this.searchQuery = query;
         this.searchMode = true;
         this.searchOffset = 0;
@@ -215,9 +228,11 @@ export class PostListProvider
         if (!this.searchHasMore) return;
         if (this.searchResults.length >= MAX_SEARCH_RESULTS) return;
         this.searchLoading = true;
+        const generation = this.generation;
         try {
             const pageSize = 30;
             const result = await this.client.searchPosts(this.searchQuery, this.searchOffset, pageSize);
+            if (generation !== this.generation) return;
             const newPosts = (result.items || []).map((item) => item.info).filter((info) => info && info.linkid);
             // API 有时会把同一 linkid 以 number / string 两种形式返回；同时同一页本身也可能重复。
             // 使用字符串主键并在筛选过程中立即登记，确保跨页和页内都只保留一条。
@@ -238,9 +253,10 @@ export class PostListProvider
                 this.searchHasMore = false;
             }
         } catch (e) {
+            if (generation !== this.generation) return;
             this.searchError = (e as Error).message || "未知错误";
             this.searchHasMore = false;
-        } finally { this.searchLoading = false; }
+        } finally { if (generation === this.generation) this.searchLoading = false; }
     }
 
     getTreeItem(element: TreeItemBase): vscode.TreeItem { return element; }
@@ -327,8 +343,10 @@ export class PostListProvider
     private async fetchFeed(): Promise<void> {
         if (this.feedLoading || !this.feedHasMore) return;
         this.feedLoading = true;
+        const generation = this.generation;
         try {
             const result = await this.client.getFeed(this.feedOffset);
+            if (generation !== this.generation) return;
             const page = (result.links || []).filter((p) => p && p.linkid);
             const known = new Set(this.feedPosts.map((post) => String(post.linkid)));
             const added = page.filter((post) => {
@@ -340,30 +358,35 @@ export class PostListProvider
             this.feedPosts.push(...added);
             this.feedOffset += page.length;
             this.feedHasMore = page.length > 0 && added.length > 0;
-        } catch (e) { this.feedError = (e as Error).message || "未知错误"; }
-        finally { this.feedLoading = false; }
-        this.fetchFavCounts(this.feedPosts);
+        } catch (e) { if (generation === this.generation) this.feedError = (e as Error).message || "未知错误"; }
+        finally { if (generation === this.generation) this.feedLoading = false; }
+        this.fetchFavCounts(this.feedPosts, generation);
     }
 
     /** 获取板块分类列表（仅加载一次） */
     private async fetchTopics(): Promise<void> {
         if (this.loadingTopics) return;
         this.loadingTopics = true;
+        const generation = this.generation;
         try {
-            this.topics = (await this.client.getTopicCategories()).latest_hot_topics?.children || [];
-        } catch (e) { this.topicsError = (e as Error).message || "未知错误"; }
-        finally { this.loadingTopics = false; }
+            const result = await this.client.getTopicCategories();
+            if (generation !== this.generation) return;
+            this.topics = result.latest_hot_topics?.children || [];
+        } catch (e) { if (generation === this.generation) this.topicsError = (e as Error).message || "未知错误"; }
+        finally { if (generation === this.generation) this.loadingTopics = false; }
     }
 
     /** 懒加载指定板块下的帖子列表，支持分页追加 */
     private async fetchTopicPosts(topicId: number): Promise<void> {
         if (this.loadingTopicsSet.has(topicId) || this.topicHasMore.get(topicId) === false) return;
         this.loadingTopicsSet.add(topicId);
+        const generation = this.generation;
         this.expandedTopics.add(topicId);
         this.saveExpanded();
         try {
             const offset = this.topicOffsets.get(topicId) || 0;
             const result = await this.client.getTopicFeeds(topicId, offset, 30);
+            if (generation !== this.generation) return;
             const page = (result.links || []).filter((p) => p && p.linkid);
             const existing = this.topicPosts.get(topicId) || [];
             const known = new Set(existing.map((post) => String(post.linkid)));
@@ -376,29 +399,31 @@ export class PostListProvider
             this.topicPosts.set(topicId, existing.concat(added));
             this.topicOffsets.set(topicId, offset + page.length);
             this.topicHasMore.set(topicId, page.length > 0 && added.length > 0 && page.length >= 30);
-        } catch (e) { this.topicErrors.set(topicId, (e as Error).message || "未知错误"); }
-        finally { this.loadingTopicsSet.delete(topicId); }
-        this.fetchFavCounts(this.topicPosts.get(topicId) || []);
+        } catch (e) { if (generation === this.generation) this.topicErrors.set(topicId, (e as Error).message || "未知错误"); }
+        finally { if (generation === this.generation) this.loadingTopicsSet.delete(topicId); }
+        this.fetchFavCounts(this.topicPosts.get(topicId) || [], generation);
     }
 
     /** 分页读取云端默认收藏夹；网络失败时保留旧版本地缓存作为离线兜底。 */
     private async fetchFavourites(): Promise<void> {
         if (this.favouritesLoading || !this.favouritesHasMore) return;
         this.favouritesLoading = true;
+        const generation = this.generation;
         try {
             const page = await this.client.getFavouriteLinks(this.favouriteOffset, 30);
-            const known = new Set(this.favouritePosts.map((post) => post.linkid));
-            const added = page.links.filter((post) => !known.has(post.linkid));
+            if (generation !== this.generation) return;
+            const known = new Set(this.favouritePosts.map((post) => String(post.linkid)));
+            const added = page.links.filter((post) => !known.has(String(post.linkid)));
             this.favouritePosts.push(...added);
-            for (const post of added) this.serverFavouriteIds.add(post.linkid);
+            for (const post of added) this.serverFavouriteIds.add(String(post.linkid));
             this.favouriteOffset += page.links.length;
             this.favouritesHasMore = page.hasMore && added.length > 0;
             this.favouritesLoaded = true;
-            this.fetchFavCounts(added);
+            this.fetchFavCounts(added, generation);
         } catch (e) {
-            this.favouritesError = (e as Error).message || "未知错误";
+            if (generation === this.generation) this.favouritesError = (e as Error).message || "未知错误";
         } finally {
-            this.favouritesLoading = false;
+            if (generation === this.generation) this.favouritesLoading = false;
         }
     }
 
@@ -409,6 +434,7 @@ export class PostListProvider
         if (state.loading || !state.hasMore) return;
         state.loading = true;
         this.messagePages.set(section, state);
+        const generation = this.generation;
         try {
             let entries: MessageEntry[] = [];
             let cursor = state.cursor;
@@ -417,28 +443,35 @@ export class PostListProvider
                 const messages = result.messages || [];
                 entries = messages.map((message, index) => this.toOfficialEntry(message, index));
                 cursor = String(result.lastval ?? messages.at(-1)?.timestamp ?? "");
+                state.hasMore = hasNextPage(result.has_next ?? result.has_more) ?? (messages.length > 0 && cursor !== state.cursor);
             } else if (section === "discount") {
                 const result = await this.client.getDiscountMessages(state.offset, state.cursor);
                 const messages = result.msg_list || [];
                 entries = messages.map((message, index) => this.toDiscountEntry(message, index));
                 cursor = String(result.last_timestamp ?? "");
+                state.hasMore = hasNextPage(result.has_next ?? result.has_more) ?? (messages.length > 0 && cursor !== state.cursor);
             } else {
                 const result = await this.client.getInteractionMessages(section, state.offset, 20);
                 entries = (result.messages || []).map((message, index) => this.toInteractionEntry(section, message, index));
+                state.hasMore = hasNextPage(result.has_next ?? result.has_more) ?? entries.length === 20;
             }
+            if (generation !== this.generation || this.messagePages.get(section) !== state) return;
             const known = new Set(state.entries.map((entry) => entry.id));
             const added = entries.filter((entry) => !known.has(entry.id));
             state.entries.push(...added);
             state.offset += entries.length;
             state.cursor = cursor;
-            state.hasMore = entries.length === 20 && added.length > 0;
+            state.hasMore = state.hasMore && added.length > 0;
         } catch (e) {
+            if (generation !== this.generation || this.messagePages.get(section) !== state) return;
             state.error = (e as Error).message || "未知错误";
             state.hasMore = false;
         } finally {
-            state.loading = false;
-            this.messagePages.set(section, state);
-            this._onDidChangeTreeData.fire();
+            if (generation === this.generation && this.messagePages.get(section) === state) {
+                state.loading = false;
+                this.messagePages.set(section, state);
+                this._onDidChangeTreeData.fire();
+            }
         }
     }
 
@@ -455,7 +488,7 @@ export class PostListProvider
             detail: this.formatTime(stamp),
             timestamp: stamp,
             linkId: linkId || undefined,
-            unread: this.isUnread(message),
+            unread: isUnread(message),
         };
     }
 
@@ -468,7 +501,7 @@ export class PostListProvider
             title: `${sender}: ${title}`,
             detail: this.formatTime(stamp),
             timestamp: stamp,
-            unread: this.isUnread(message),
+            unread: isUnread(message),
         };
     }
 
@@ -481,27 +514,8 @@ export class PostListProvider
             title: summary,
             detail: message.datetime || this.formatTime(stamp),
             timestamp: stamp,
-            unread: this.isUnread(message),
+            unread: isUnread(message),
         };
-    }
-
-    /** 接口字段命名不统一；只在明确表示未读时加标识，避免误标历史消息。 */
-    private isUnread(message: {
-        is_read?: string | number | boolean;
-        has_read?: string | number | boolean;
-        is_unread?: string | number | boolean;
-        unread?: string | number | boolean;
-        read_status?: string | number | boolean;
-    }): boolean {
-        const value = (input: unknown) => String(input ?? "").trim().toLowerCase();
-        const isUnread = (input: unknown) => ["1", "true", "yes", "unread"].includes(value(input));
-        const isRead = (input: unknown) => ["0", "false", "no", "read"].includes(value(input));
-        if (message.is_unread !== undefined) return isUnread(message.is_unread);
-        if (message.unread !== undefined) return isUnread(message.unread);
-        if (message.is_read !== undefined) return !isRead(message.is_read);
-        if (message.has_read !== undefined) return !isRead(message.has_read);
-        if (message.read_status !== undefined) return !isRead(message.read_status);
-        return false;
     }
 
     private formatTime(timestamp?: number): string {
@@ -511,7 +525,8 @@ export class PostListProvider
     }
 
     /** 使用列表接口已有的收藏数，避免为列表展示额外请求帖子详情接口。 */
-    private async fetchFavCounts(posts: SearchItemInfo[]): Promise<void> {
+    private async fetchFavCounts(posts: SearchItemInfo[], generation = this.generation): Promise<void> {
+        if (generation !== this.generation) return;
         for (const post of posts) {
             if (typeof post.favour_count === "number") {
                 this.favCache.set(post.linkid, post.favour_count);
@@ -552,6 +567,9 @@ export class PostListProvider
 
     /** 收藏操作完成后丢弃服务端缓存并重新读取。 */
     async refreshFavourites(): Promise<void> {
+        const generation = ++this.generation;
+        this.favouritesLoading = false;
+        this.favouritesSync = undefined;
         this.favouritePosts = [];
         this.favouriteOffset = 0;
         this.favouritesLoaded = false;
@@ -559,28 +577,35 @@ export class PostListProvider
         this.serverFavouriteIds.clear();
         this.favouritesStateComplete = false;
         if (this.viewMode === "favorites") await this.fetchFavourites();
-        this._onDidChangeTreeData.fire();
+        if (generation === this.generation) this._onDidChangeTreeData.fire();
     }
 
     /**
      * 在收藏操作前后读取服务端收藏夹，避免把过期本地缓存当作真实状态。
      * 设定页数上限，防止异常账户导致无界请求。
      */
-    async synchroniseFavouriteState(): Promise<void> {
+    async synchroniseFavouriteState(targetLinkId?: string | number): Promise<void> {
         if (this.favouritesSync) return this.favouritesSync;
         this.favouritesSync = (async () => {
-            const ids = new Set<number>();
+            const generation = this.generation;
+            const ids = new Set<string>();
             let offset = 0;
             let hasMore = true;
+            let stoppedAfterMatch = false;
             for (let page = 0; page < 50 && hasMore; page++) {
                 const result = await this.client.getFavouriteLinks(offset, 50);
-                for (const post of result.links) ids.add(post.linkid);
+                for (const post of result.links) ids.add(String(post.linkid));
                 offset += result.links.length;
                 hasMore = result.hasMore && result.links.length > 0;
+                if (targetLinkId !== undefined && ids.has(String(targetLinkId))) {
+                    stoppedAfterMatch = true;
+                    hasMore = false;
+                }
             }
+            if (generation !== this.generation) return;
             this.serverFavouriteIds.clear();
             ids.forEach((id) => this.serverFavouriteIds.add(id));
-            this.favouritesStateComplete = !hasMore;
+            this.favouritesStateComplete = !hasMore && !stoppedAfterMatch;
             this._onDidChangeTreeData.fire();
         })();
         try { await this.favouritesSync; }
@@ -588,14 +613,23 @@ export class PostListProvider
     }
 
     /** 收藏入口调用此方法获取服务端状态；无法读到状态时宁可中止也不猜测。 */
-    async isFavouritedOnServer(linkId: number): Promise<boolean> {
-        if (!this.favouritesStateComplete) await this.synchroniseFavouriteState();
+    async isFavouritedOnServer(linkId: string | number): Promise<boolean> {
+        if (this.serverFavouriteIds.has(String(linkId))) return true;
+        if (!this.favouritesStateComplete) await this.synchroniseFavouriteState(linkId);
         if (!this.favouritesStateComplete) throw new Error("收藏列表未能完整加载，无法确认服务端收藏状态");
-        return this.serverFavouriteIds.has(linkId);
+        return this.serverFavouriteIds.has(String(linkId));
+    }
+
+    /** 记录已成功提交的切换结果，避免再次全量扫描收藏夹。 */
+    applyFavouriteToggle(linkId: string | number, nowFavourited: boolean): void {
+        const id = String(linkId);
+        if (nowFavourited) this.serverFavouriteIds.add(id);
+        else this.serverFavouriteIds.delete(id);
+        this._onDidChangeTreeData.fire();
     }
 
     private isServerFavourite(post: SearchItemInfo): boolean {
-        return this.serverFavouriteIds.has(post.linkid);
+        return this.serverFavouriteIds.has(String(post.linkid));
     }
 }
 

@@ -111,7 +111,7 @@ export interface PostTreeResult {
     link: PostLink;
     comments: CommentGroup[];
     /** 是否还有更多楼层（分页标识） */
-    has_more_floors: number;
+    has_more_floors: string | number | boolean;
 }
 
 /** API 通用响应包装 */
@@ -219,6 +219,9 @@ export interface MessageItem {
 /** 消息列表接口返回值 */
 export interface MessageListResult {
     messages: MessageItem[];
+    has_more?: string | number | boolean;
+    has_next?: string | number | boolean;
+    lastval?: string | number;
 }
 
 /** 网页端“我的收藏”接口返回的收藏链接包装。 */
@@ -252,6 +255,8 @@ export interface OfficialMessageItem {
 export interface OfficialMessageResult {
     messages?: OfficialMessageItem[];
     lastval?: string | number;
+    has_more?: string | number | boolean;
+    has_next?: string | number | boolean;
     entry_info?: { name?: string };
 }
 
@@ -272,4 +277,6 @@ export interface DiscountMessageItem {
 export interface DiscountMessageResult {
     msg_list?: DiscountMessageItem[];
     last_timestamp?: string | number;
+    has_more?: string | number | boolean;
+    has_next?: string | number | boolean;
 }

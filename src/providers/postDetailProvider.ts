@@ -22,7 +22,7 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
         private readonly onLoadMoreComments?: (linkId: string, rootId?: string) => void,
         private readonly onRequestOriginalImage?: (url: string) => Promise<string>,
         private readonly onOpenOriginalImage?: (url: string) => void,
-        private readonly onPostAction?: (action: string, post: PostTreeResult) => void,
+        private readonly onPostAction?: (action: string, post: PostTreeResult) => Promise<void> | void,
         private readonly onSaveReadPosition?: (linkId: string, position: number) => void,
     ) {}
 
@@ -40,7 +40,10 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
             }
             if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) void this.loadOriginalImage(msg.url);
             if (["copyLink", "openInBrowser", "toggleFavourite", "goBack", "goForward"].includes(msg?.command) && this._currentPost) {
-                this.onPostAction?.(msg.command, this._currentPost);
+                void Promise.resolve(this.onPostAction?.(msg.command, this._currentPost)).then(
+                    () => this._view?.webview.postMessage({ command: "actionResult", action: msg.command, success: true }),
+                    (error) => this._view?.webview.postMessage({ command: "actionResult", action: msg.command, success: false, message: error instanceof Error ? error.message : "操作失败" }),
+                );
             }
             if (msg?.command === "saveReadPosition" && this._currentPost
                 && String(this._currentPost.link.linkid) === String(msg.linkId)

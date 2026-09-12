@@ -18,6 +18,7 @@ import { PostListProvider } from "./providers/postListProvider";
 import { PostDetailViewProvider } from "./providers/postDetailProvider";
 import { SearchItemInfo, PostTreeResult } from "./types";
 import { postHtml } from "./utils/htmlRenderer";
+import { getReadState } from "./utils/messageState";
 
 let postDetailProvider: PostDetailViewProvider | undefined;
 let postListProvider: PostListProvider | undefined;
@@ -72,30 +73,6 @@ const NOTIFICATION_SECTION_LABELS: Record<NotificationSection, string> = {
     comment: "评论与回复", award: "获赞", follow: "关注", mention: "@我", official: "官方消息", discount: "游戏优惠",
 };
 
-type ReadStateValue = string | number | boolean | undefined;
-
-/**
- * 将不同消息接口的已读字段归一化。缺少字段时返回 false：
- * 不能把“插件第一次看到”误当成“服务端未读”。
- */
-function getReadState(message: {
-    is_read?: ReadStateValue;
-    has_read?: ReadStateValue;
-    is_unread?: ReadStateValue;
-    unread?: ReadStateValue;
-    read_status?: ReadStateValue;
-}): "unread" | "read" | "unknown" {
-    const normalized = (value: ReadStateValue): string => String(value ?? "").trim().toLowerCase();
-    const isTrue = (value: ReadStateValue) => ["1", "true", "yes", "unread"].includes(normalized(value));
-    const isFalse = (value: ReadStateValue) => ["0", "false", "no", "read"].includes(normalized(value));
-    if (message.is_unread !== undefined) return isTrue(message.is_unread) ? "unread" : "read";
-    if (message.unread !== undefined) return isTrue(message.unread) ? "unread" : "read";
-    if (message.is_read !== undefined) return isFalse(message.is_read) ? "unread" : "read";
-    if (message.has_read !== undefined) return isFalse(message.has_read) ? "unread" : "read";
-    if (message.read_status !== undefined) return isFalse(message.read_status) ? "unread" : "read";
-    return "unknown";
-}
-
 function notificationTimestamp(value: number | undefined): number | undefined {
     if (!value || !Number.isFinite(value)) return undefined;
     return value < 10_000_000_000 ? value * 1000 : value;
@@ -142,7 +119,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
     }, (url) => client.getOriginalImageUrl(url), openOriginalImagePreview, (action, post) => {
         if (action === "goBack" || action === "goForward") void vscode.commands.executeCommand(`heybox.${action}`);
-        else void handleDetailAction(action, post);
+        else return handleDetailAction(action, post);
     }, (linkId, position) => saveReadPosition(context, linkId, position));
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
@@ -341,13 +318,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         }
         favouriteInFlight.add(linkId);
         try {
-            const wasFav = await postListProvider!.isFavouritedOnServer(Number(post.linkid));
+            const wasFav = await postListProvider!.isFavouritedOnServer(linkId);
             await client.favouritePost(linkId);
-            await postListProvider!.refreshFavourites();
-            await postListProvider!.synchroniseFavouriteState();
-            const isFav = await postListProvider!.isFavouritedOnServer(Number(post.linkid));
+            // /favour 是切换型接口。已确认的写入前状态可推导预期结果，
+            // 因此无需再次扫描整个收藏夹。
+            const isFav = !wasFav;
+            postListProvider!.applyFavouriteToggle(linkId, isFav);
             vscode.window.showInformationMessage(isFav ? "已收藏（服务端已同步）" : "已取消收藏（服务端已同步）");
-            if (isFav === wasFav) vscode.window.showWarningMessage("收藏状态未变化，请稍后在小黑盒客户端确认。");
         } catch (error) {
             const message = error instanceof Error ? error.message : "未知错误";
             vscode.window.showErrorMessage(`收藏失败: ${message}`);
@@ -383,7 +360,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         );
         if (confirmed === "确定") {
             accountGeneration++;
+            postRequestGeneration++;
             pollSessionGeneration++;
+            lastSeenIds.clear();
             await client.clearCookie();
             vscode.window.showInformationMessage("已退出登录");
             postListProvider!.refresh();
@@ -471,6 +450,7 @@ async function loadRepliesForPost(
         render(post, shown >= total ? undefined : `共 ${total} 条评论，当前显示 ${shown} 条`);
     } catch (e) {
         vscode.window.showErrorMessage(`加载回复失败: ${(e as Error).message || "未知错误"}`);
+        render(post, `加载回复失败：${(e as Error).message || "未知错误"}，请重试`);
     }
 }
 
@@ -500,6 +480,7 @@ async function loadMoreCommentsForPost(
         render(post, Number(post.has_more_floors) === 0 ? undefined : `共 ${total} 条评论，当前显示 ${shown} 条`);
     } catch (error) {
         vscode.window.showErrorMessage(`加载更多评论失败: ${(error as Error).message || "未知错误"}`);
+        render(post, `加载更多评论失败：${(error as Error).message || "未知错误"}，请重试`);
     }
 }
 
@@ -555,10 +536,11 @@ async function openAndShowPost(
     navigation: "push" | "restore" = "push",
 ): Promise<void> {
     const requestGeneration = ++postRequestGeneration;
+    const requestAccountGeneration = accountGeneration;
     try {
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "加载帖子中...", cancellable: false }, async () => {
             const tree = await client.getPostTree(linkId, 0, loadAll ? 100 : 20);
-            if (requestGeneration !== postRequestGeneration) return;
+            if (requestGeneration !== postRequestGeneration || requestAccountGeneration !== accountGeneration) return;
             if (!tree || !tree.link) { vscode.window.showWarningMessage("未获取到帖子内容"); return; }
 
             saveReadingHistory(context, linkId, tree.link.title || "无标题");
@@ -609,13 +591,13 @@ async function openAndShowPost(
                 : `共 ${totalCommentNum} 条评论，当前显示 ${loadedCount} 条`;
 
             if (location === "sidebar" && postDetailProvider) {
-                if (requestGeneration !== postRequestGeneration) return;
+                if (requestGeneration !== postRequestGeneration || requestAccountGeneration !== accountGeneration) return;
                 postDetailProvider.showPost(fullTree, commentNote, foldedTips, getReadPosition(context, linkId));
                 if (!postDetailProvider.isViewVisible()) {
                     vscode.window.showInformationMessage("帖子已加载，请在侧边栏点击「帖子详情」查看");
                 }
             } else {
-                if (requestGeneration !== postRequestGeneration) return;
+                if (requestGeneration !== postRequestGeneration || requestAccountGeneration !== accountGeneration) return;
                 if (currentPanel) currentPanel.dispose();
                 const col = location === "beside" ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
                 const panel = vscode.window.createWebviewPanel("heybox.postDetailPanel", stealth ? "README.md" : "帖子", col, { enableScripts: true });
@@ -628,7 +610,10 @@ async function openAndShowPost(
                         return;
                     }
                     if (["copyLink", "openInBrowser", "toggleFavourite"].includes(msg?.command) && currentPanelPost) {
-                        void handleDetailAction(msg.command, currentPanelPost);
+                        void handleDetailAction(msg.command, currentPanelPost).then(
+                            () => panel.webview.postMessage({ command: "actionResult", action: msg.command, success: true }),
+                            (error) => panel.webview.postMessage({ command: "actionResult", action: msg.command, success: false, message: error instanceof Error ? error.message : "操作失败" }),
+                        );
                         return;
                     }
                     if (msg?.command === "goBack" || msg?.command === "goForward") {
@@ -663,7 +648,7 @@ async function openAndShowPost(
             }
         });
     } catch (e) {
-        if (requestGeneration !== postRequestGeneration) return;
+        if (requestGeneration !== postRequestGeneration || requestAccountGeneration !== accountGeneration) return;
         if (isCaptchaError(e)) {
             vscode.window.showErrorMessage(
                 "帖子详情被服务端风控拦截，请在浏览器中完成人机验证后重新扫码登录。",
@@ -780,6 +765,8 @@ function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxCl
  */
 function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem, nickname?: string): void {
     accountGeneration++;
+    postRequestGeneration++;
+    lastSeenIds.clear();
     vscode.window.showInformationMessage(nickname ? `登录成功，欢迎你，${nickname}！` : "登录成功！");
     postListProvider?.refresh();
     if (statusBarItem) {
@@ -802,13 +789,15 @@ async function loginByPaste(client: HeyBoxClient, context: vscode.ExtensionConte
     });
     if (!cookie) return;
     if (client.validateCookie(cookie)) {
+        const previousCookie = client.getCookie();
         await client.setCookie(cookie);
         try {
             await client.getFavouriteLinks(0, 1);
             onLoginSuccess(client, context, statusBarItem);
         } catch (error) {
             if (isAuthenticationError(error)) {
-                await client.clearCookie();
+                if (previousCookie && client.validateCookie(previousCookie)) await client.setCookie(previousCookie);
+                else await client.clearCookie();
                 vscode.window.showErrorMessage("Cookie 已失效，请重新获取后再试。");
             } else vscode.window.showWarningMessage(`无法验证 Cookie：${(error as Error).message || "网络请求失败"}`);
         }
@@ -820,16 +809,18 @@ async function loginByPaste(client: HeyBoxClient, context: vscode.ExtensionConte
 /**
  * 从剪贴板导入 Cookie 并验证
  */
-async function importCookieFromClipboard(context: vscode.ExtensionContext, client: HeyBoxClient): Promise<void> {
+async function importCookieFromClipboard(context: vscode.ExtensionContext, client: HeyBoxClient, statusBarItem?: vscode.StatusBarItem): Promise<void> {
     const clip = await vscode.env.clipboard.readText();
     if (client.validateCookie(clip)) {
+        const previousCookie = client.getCookie();
         await client.setCookie(clip);
         try {
             await client.getFavouriteLinks(0, 1);
-            vscode.window.showInformationMessage("Cookie 已导入并验证成功！请刷新侧边栏。");
+            onLoginSuccess(client, context, statusBarItem);
         } catch (error) {
             if (isAuthenticationError(error)) {
-                await client.clearCookie();
+                if (previousCookie && client.validateCookie(previousCookie)) await client.setCookie(previousCookie);
+                else await client.clearCookie();
                 vscode.window.showErrorMessage("Cookie 已失效，请重新获取后再试。");
             } else vscode.window.showWarningMessage(`Cookie 已保存，但暂时无法验证：${(error as Error).message || "网络请求失败"}`);
         }

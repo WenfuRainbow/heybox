@@ -30,6 +30,8 @@ export async function showQrLoginPanel(
     let pollTimer: ReturnType<typeof setInterval> | undefined;
     let pollInFlight = false;
     let sessionGeneration = 0;
+    let closed = false;
+    let terminal = false;
     let webviewReady = false;
     let qrImage = "";
     let lastStatus: QrLoginStatus = { state: "waiting", message: "正在生成二维码…", remainingSeconds: 0 };
@@ -41,9 +43,8 @@ export async function showQrLoginPanel(
 
     const updateStatus = (status: QrLoginStatus) => {
         lastStatus = status;
-        // QrLoginStatus also carries the Cookie on success. A webview is a
-        // separate, less trusted renderer, so never spread that object across
-        // the process boundary.
+        // QrLoginStatus 在成功时还携带 Cookie。Webview 属于权限更低的独立渲染端，
+        // 因此绝不能把整个对象跨进程发送给它。
         if (webviewReady) {
             void panel.webview.postMessage({
                 type: "status",
@@ -60,23 +61,32 @@ export async function showQrLoginPanel(
     };
 
     const poll = async () => {
-        if (!session || pollInFlight) return;
+        if (closed || terminal || !session || pollInFlight) return;
         const sessionToPoll = session;
+        const generationToPoll = sessionGeneration;
         pollInFlight = true;
         try {
             const status = await client.pollQrLogin(sessionToPoll);
-            if (session !== sessionToPoll) return;
+            if (closed || terminal || session !== sessionToPoll || generationToPoll !== sessionGeneration || activePanel !== panel) return;
             updateStatus(status);
             if (status.state === "success" && status.cookie) {
+                terminal = true;
                 stopPolling();
                 await client.setCookie(status.cookie);
+                // 写入 SecretStorage 期间面板仍可能被取消。
+                // 已废弃的扫码会话绝不能继续进入登录成功流程。
+                if (closed || generationToPoll !== sessionGeneration || activePanel !== panel) {
+                    if (client.getCookie() === status.cookie) await client.clearCookie();
+                    return;
+                }
                 await onSuccess(status.nickname);
-                setTimeout(() => panel.dispose(), 900);
+                if (!closed && activePanel === panel) setTimeout(() => panel.dispose(), 900);
             } else if (status.state === "expired" || status.state === "failed") {
+                terminal = true;
                 stopPolling();
             }
         } catch (error) {
-            if (session !== sessionToPoll) return;
+            if (closed || terminal || session !== sessionToPoll || generationToPoll !== sessionGeneration || activePanel !== panel) return;
             // 临时网络波动不废弃仍有效的二维码；下一轮继续尝试。
             updateStatus({
                 state: "waiting",
@@ -91,6 +101,7 @@ export async function showQrLoginPanel(
     const createSession = async () => {
         const generation = ++sessionGeneration;
         stopPolling();
+        terminal = false;
         session = undefined;
         qrImage = "";
         webviewReady = false;
@@ -108,7 +119,7 @@ export async function showQrLoginPanel(
             session = nextSession;
             updateQrImage(nextQrImage);
             await poll();
-            if (generation === sessionGeneration && session === nextSession) {
+            if (!closed && !terminal && generation === sessionGeneration && session === nextSession && activePanel === panel) {
                 pollTimer = setInterval(() => { void poll(); }, 2000);
             }
         } catch (error) {
@@ -133,7 +144,10 @@ export async function showQrLoginPanel(
         if (message.command === "cancel") panel.dispose();
     });
     panel.onDidDispose(() => {
+        closed = true;
+        terminal = true;
         sessionGeneration++;
+        session = undefined;
         stopPolling();
         if (activePanel === panel) activePanel = undefined;
     });
