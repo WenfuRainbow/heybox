@@ -46,11 +46,13 @@ export class RequestCoordinator {
         this.sleep = options.sleep ?? defaultSleep;
     }
 
-    execute<T>(key: string, sensitive: boolean, operation: () => Promise<T>): Promise<T> {
+    execute<T>(key: string, sensitive: boolean, operation: () => Promise<T>, retry = true): Promise<T> {
         const existing = this.inFlight.get(key);
         if (existing) return existing as Promise<T>;
 
-        const request = this.enqueue(sensitive, () => this.withRetries(operation));
+        // 写入接口是否幂等并不由协调器知晓。调用方必须明确选择是否允许
+        // 重试，避免网络超时后把一次“切换收藏”又提交一遍。
+        const request = this.enqueue(sensitive, () => retry ? this.withRetries(operation) : operation());
         this.inFlight.set(key, request);
         const clear = () => {
             if (this.inFlight.get(key) === request) this.inFlight.delete(key);

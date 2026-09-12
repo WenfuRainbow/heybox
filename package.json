@@ -23,6 +23,10 @@
     "onView:heybox.postList",
     "onCommand:heybox.refreshList",
     "onCommand:heybox.searchPost",
+    "onCommand:heybox.showReadingHistory",
+    "onCommand:heybox.continueReading",
+    "onCommand:heybox.goBack",
+    "onCommand:heybox.goForward",
     "onCommand:heybox.openPost",
     "onCommand:heybox.openByUrl",
     "onCommand:heybox.loadMore",
@@ -40,6 +44,7 @@
     "onCommand:heybox.logout",
     "onCommand:heybox.toggleFavourite",
     "onCommand:heybox.toggleNotifications",
+    "onCommand:heybox.configureNotifications",
     "onCommand:heybox.markAllRead",
     "onCommand:heybox.openInBrowser",
     "onCommand:heybox.toggleSidebar",
@@ -76,6 +81,16 @@
         {
           "command": "heybox.searchPost",
           "when": "view == heybox.postList || view == heybox.postDetail",
+          "group": "navigation"
+        },
+        {
+          "command": "heybox.goBack",
+          "when": "view == heybox.postDetail",
+          "group": "navigation"
+        },
+        {
+          "command": "heybox.goForward",
+          "when": "view == heybox.postDetail",
           "group": "navigation"
         },
         {
@@ -117,6 +132,28 @@
       {
         "command": "heybox.exitSearch",
         "title": "返回话题列表",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.showReadingHistory",
+        "title": "阅读历史",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.continueReading",
+        "title": "继续阅读上次帖子",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.goBack",
+        "title": "返回上一帖",
+        "icon": "$(arrow-left)",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.goForward",
+        "title": "前进到下一帖",
+        "icon": "$(arrow-right)",
         "category": "HeyBox"
       },
       {
@@ -183,8 +220,13 @@
         "category": "HeyBox"
       },
       {
+        "command": "heybox.configureNotifications",
+        "title": "配置消息提醒分类",
+        "category": "HeyBox"
+      },
+      {
         "command": "heybox.markAllRead",
-        "title": "标记所有消息为已读",
+        "title": "在小黑盒客户端标记消息已读",
         "icon": "$(check-all)",
         "category": "HeyBox"
       },
@@ -304,7 +346,7 @@
         "heybox.cookie": {
           "type": "string",
           "default": "",
-          "description": "小黑盒登录凭证（扫码登录后自动保存到安全存储；此项仅兼容手动导入）"
+          "description": "旧版手动 Cookie 兼容项：首次读取时会迁移至 VS Code 安全存储并清空此明文设置；建议使用扫码登录或登录菜单导入"
         },
         "heybox.deviceId": {
           "type": "string",

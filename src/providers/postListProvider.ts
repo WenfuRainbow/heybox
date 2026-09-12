@@ -24,34 +24,9 @@ interface MessagePageState {
     error?: string;
 }
 
-const FAV_KEY = "heybox.favorites";          // 全局状态中收藏夹的存储键
 const EXPANDED_KEY = "heybox.expandedTopics"; // 已展开话题的持久化键
 const LAST_POST_KEY = "heybox.lastPostId";    // 上次阅读帖子的持久化键
 const MAX_SEARCH_RESULTS = 200; // 搜索结果上限，防止内存无限增长
-
-/** 从全局状态中读取收藏列表 */
-function getFavs(context?: vscode.ExtensionContext): SearchItemInfo[] {
-    if (!context) return [];
-    return context.globalState.get<SearchItemInfo[]>(FAV_KEY, []);
-}
-
-/**
- * 切换帖子的收藏状态：已收藏则取消，未收藏则添加到列表首位
- * @returns 更新后的完整收藏列表
- */
-export function toggleFav(context: vscode.ExtensionContext, post: SearchItemInfo): SearchItemInfo[] {
-    const favs = getFavs(context);
-    const idx = favs.findIndex((f) => f.linkid === post.linkid);
-    if (idx >= 0) {
-        favs.splice(idx, 1);
-    } else {
-        favs.unshift(post);
-    }
-    context.globalState.update(FAV_KEY, favs);
-    return favs;
-}
-
-export { getFavs };
 
 /**
  * 帖子列表的 TreeView 数据提供者
@@ -122,6 +97,10 @@ export class PostListProvider
     private favouritesHasMore = true;
     private favouritesLoading = false;
     private favouritesError: string | undefined;
+    /** 最近一次服务端收藏夹读取到的状态；本地缓存绝不作为展示依据。 */
+    private readonly serverFavouriteIds = new Set<number>();
+    private favouritesStateComplete = false;
+    private favouritesSync?: Promise<void>;
     private topicsError: string | undefined;
     private readonly topicErrors = new Map<number, string>();
 
@@ -188,11 +167,14 @@ export class PostListProvider
         this.favouritesLoaded = false;
         this.favouritesHasMore = true;
         this.favouritesError = undefined;
+        this.serverFavouriteIds.clear();
+        this.favouritesStateComplete = false;
         this.messagePages.clear();
         this._onDidChangeTreeData.fire();
     }
 
     get isSearchMode(): boolean { return this.searchMode; }
+    getSearchQuery(): string { return this.searchQuery; }
 
     /** 退出搜索模式，清空搜索状态 */
     exitSearch(): void {
@@ -277,7 +259,7 @@ export class PostListProvider
             const tabs: TreeItemBase[] = [new ModeSelectorItem(this.viewMode)];
             if (this.viewMode === "recommend") {
                 if (this.feedPosts.length === 0 && !this.feedLoading && !this.feedError) await this.fetchFeed();
-                tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx)));
+                tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.isServerFavourite(p))));
                 if (this.feedLoading) tabs.push(new BusyItem("正在加载推荐..."));
                 else if (this.feedError) tabs.push(new RetryItem(`加载推荐失败：${this.feedError}`));
                 else if (this.feedHasMore) tabs.push(new LoadMoreFeedItem());
@@ -287,7 +269,7 @@ export class PostListProvider
                 if (this.favouritePosts.length === 0) {
                     tabs.push(this.favouritesError ? new RetryItem(`加载收藏失败：${this.favouritesError}`) : new TabEmptyItem("暂无云端收藏"));
                 } else {
-                    tabs.push(...this.favouritePosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx, true)));
+                    tabs.push(...this.favouritePosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, true)));
                     if (this.favouritesHasMore) tabs.push(new LoadMoreFavouritesItem());
                 }
             } else if (this.viewMode === "messages") {
@@ -305,7 +287,7 @@ export class PostListProvider
         if (element instanceof TopicItem) {
             const tid = element.topic.topic_id;
             if (!this.topicPosts.has(tid) && !this.topicErrors.has(tid)) await this.fetchTopicPosts(tid);
-            const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx));
+            const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.isServerFavourite(p)));
             if (this.loadingTopicsSet.has(tid)) items.push(new BusyItem("正在加载帖子..."));
             else if (this.topicErrors.has(tid)) items.push(new RetryItem(`加载帖子失败：${this.topicErrors.get(tid)}`));
             else if (this.topicHasMore.get(tid) !== false) items.push(new LoadMoreTopicItem(tid));
@@ -334,7 +316,7 @@ export class PostListProvider
             if (this.searchLoading) items.push(new BusyItem("搜索中..."));
             else if (this.searchError) items.push(new TabEmptyItem(`搜索失败：${this.searchError}`));
             else if (this.searchResults.length === 0) items.push(new TabEmptyItem("没有找到相关帖子"));
-            items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx)));
+            items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.isServerFavourite(p))));
             if (this.searchResults.length > 0 && this.searchHasMore) items.push(new LoadMoreSearchItem());
             return items;
         }
@@ -408,16 +390,12 @@ export class PostListProvider
             const known = new Set(this.favouritePosts.map((post) => post.linkid));
             const added = page.links.filter((post) => !known.has(post.linkid));
             this.favouritePosts.push(...added);
+            for (const post of added) this.serverFavouriteIds.add(post.linkid);
             this.favouriteOffset += page.links.length;
             this.favouritesHasMore = page.hasMore && added.length > 0;
             this.favouritesLoaded = true;
             this.fetchFavCounts(added);
         } catch (e) {
-            if (!this.favouritesLoaded) {
-                this.favouritePosts = getFavs(this.client.getContext());
-                this.favouritesHasMore = false;
-                this.favouritesLoaded = true;
-            }
             this.favouritesError = (e as Error).message || "未知错误";
         } finally {
             this.favouritesLoading = false;
@@ -578,8 +556,46 @@ export class PostListProvider
         this.favouriteOffset = 0;
         this.favouritesLoaded = false;
         this.favouritesHasMore = true;
+        this.serverFavouriteIds.clear();
+        this.favouritesStateComplete = false;
         if (this.viewMode === "favorites") await this.fetchFavourites();
         this._onDidChangeTreeData.fire();
+    }
+
+    /**
+     * 在收藏操作前后读取服务端收藏夹，避免把过期本地缓存当作真实状态。
+     * 设定页数上限，防止异常账户导致无界请求。
+     */
+    async synchroniseFavouriteState(): Promise<void> {
+        if (this.favouritesSync) return this.favouritesSync;
+        this.favouritesSync = (async () => {
+            const ids = new Set<number>();
+            let offset = 0;
+            let hasMore = true;
+            for (let page = 0; page < 50 && hasMore; page++) {
+                const result = await this.client.getFavouriteLinks(offset, 50);
+                for (const post of result.links) ids.add(post.linkid);
+                offset += result.links.length;
+                hasMore = result.hasMore && result.links.length > 0;
+            }
+            this.serverFavouriteIds.clear();
+            ids.forEach((id) => this.serverFavouriteIds.add(id));
+            this.favouritesStateComplete = !hasMore;
+            this._onDidChangeTreeData.fire();
+        })();
+        try { await this.favouritesSync; }
+        finally { this.favouritesSync = undefined; }
+    }
+
+    /** 收藏入口调用此方法获取服务端状态；无法读到状态时宁可中止也不猜测。 */
+    async isFavouritedOnServer(linkId: number): Promise<boolean> {
+        if (!this.favouritesStateComplete) await this.synchroniseFavouriteState();
+        if (!this.favouritesStateComplete) throw new Error("收藏列表未能完整加载，无法确认服务端收藏状态");
+        return this.serverFavouriteIds.has(linkId);
+    }
+
+    private isServerFavourite(post: SearchItemInfo): boolean {
+        return this.serverFavouriteIds.has(post.linkid);
     }
 }
 
@@ -638,14 +654,13 @@ export class TopicItem extends TreeItemBase {
 /** 帖子树节点，显示标题、收藏数和评论数，点击打开帖子详情 */
 export class PostItem extends TreeItemBase {
     public readonly post: SearchItemInfo;
-    constructor(post: SearchItemInfo, collapsibleState: vscode.TreeItemCollapsibleState, favCache?: Map<number, number>, context?: vscode.ExtensionContext, forceFavourite = false) {
+    constructor(post: SearchItemInfo, collapsibleState: vscode.TreeItemCollapsibleState, favCache?: Map<number, number>, favourited = false) {
         const label = post.title || post.description?.substring(0, 40) || "无标题";
         super(label, collapsibleState);
         this.post = post;
         const fav = favCache?.get(post.linkid);
         const minimal = vscode.workspace.getConfiguration("heybox").get<boolean>("minimalMode", false);
         if (!minimal) this.description = fav !== undefined ? `⭐${fav} 💬${post.comment_num}` : `💬${post.comment_num}`;
-        const favourited = forceFavourite || getFavs(context).some((item) => item.linkid === post.linkid);
         this.tooltip = new vscode.MarkdownString(`**${label}**\n\n${post.description?.substring(0, 100) || ""}\n\n${favourited ? "已收藏 | " : ""}${fav !== undefined ? '收藏: ' + fav + ' | ' : ''}评论: ${post.comment_num}\n话题: ${post.topics?.map((t) => t.name).join(", ") || "无"}`);
         this.command = { command: "heybox.openPost", title: "打开帖子", arguments: [post] };
         this.contextValue = "post";

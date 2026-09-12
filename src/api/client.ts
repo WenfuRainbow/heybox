@@ -74,9 +74,21 @@ export class HeyBoxClient {
         this.browserMode = config.get<"auto" | "node" | "browser">("browserMode", "auto");
         this.browserPath = config.get<string>("browserPath", "").trim();
         this.configureProxy(config.get<string>("proxy", ""));
-        // 每次都重新从 SecretStorage 读取，确保登出后能正确清除
+        // 每次都重新从 SecretStorage 读取，确保登出后能正确清除。
+        // heybox.cookie 曾是公开设置项；仅在安全存储为空时迁移一次，随后
+        // 清空明文设置，避免凭证长期留在 settings.json 中。
         this.cookie = "";
         await this.refreshCookie();
+        const configuredCookie = config.get<string>("cookie", "").trim();
+        if (!this.cookie && configuredCookie && this.validateCookie(configuredCookie)) {
+            this.cookie = configuredCookie;
+            try {
+                await this.context.secrets.store("heybox.cookie", configuredCookie);
+                await config.update("cookie", "", vscode.ConfigurationTarget.Global);
+            } catch {
+                // SecretStorage 不可用时仍可在本次会话使用兼容设置值。
+            }
+        }
 
         const storedDeviceId = this.context.globalState.get<string>("deviceId");
         const configDeviceId = config.get<string>("deviceId", "");
@@ -349,10 +361,12 @@ export class HeyBoxClient {
     ): Promise<T> {
         const key = this.requestKey(method, path, params, body);
         try {
+            // GET 是只读且可安全重试；POST 的幂等性未由服务端契约保证，
+            // 因此只执行一次，调用者可重新发起明确的用户操作。
             return await this.requestCoordinator.execute(key, isSensitiveApiPath(path), async () => {
                 const payload = await this.requestJson(method, path, params, body);
                 return parse(payload);
-            });
+            }, method === "GET");
         } catch (error) {
             if (error instanceof HeyBoxApiError) throw error;
             if (this.shouldUseBrowserTransport()) {

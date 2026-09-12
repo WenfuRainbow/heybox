@@ -125,8 +125,8 @@ function renderContent(text: string): string {
                 }
                 if (["text", "txt"].includes(type) && (b.text || b.content)) return `<p>${escHtml(b.text || b.content)}</p>`;
                 if (type === "html") return renderedHtml.get(index) || "";
-                if (["video", "vote", "poll"].includes(type)) return `<p class="unsupported">此${type === "video" ? "视频" : "互动内容"}暂不支持在插件中展示，请在原帖中查看。</p>`;
-                if (type) return `<p class="unsupported">暂不支持的内容类型：${escHtml(type)}</p>`;
+                if (["video", "vote", "poll"].includes(type)) return `<p class="unsupported">此${type === "video" ? "视频" : "互动内容"}暂不支持在插件中展示。<button class="openOriginal" type="button">打开原帖</button></p>`;
+                if (type) return `<p class="unsupported">暂不支持的内容类型：${escHtml(type)}。<button class="openOriginal" type="button">打开原帖</button></p>`;
                 return "";
             }).join("");
         }
@@ -162,7 +162,7 @@ function renderCommentHtml(c: Comment, sub: boolean, stealth: boolean): string {
  * @param foldedTips 被折叠评论的提示文案
  * @returns 完整的 HTML 字符串
  */
-export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote?: string, foldedTips?: string): string {
+export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote?: string, foldedTips?: string, readPosition = 0): string {
     const link = postTree.link;
     const user = link.user;
     const level = user.level_info?.status === 1 ? `Lv.${user.level_info.level}` : "";
@@ -221,6 +221,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .body{font-size:14px;margin-bottom:20px}
     .body p{margin:6px 0;white-space:pre-wrap}
     .unsupported{padding:8px 10px;margin:8px 0;background:var(--input-bg);color:var(--dim);border-left:3px solid var(--border);font-size:12px}
+    .unsupported button{margin-left:6px;border:0;background:none;color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer;font:inherit;text-decoration:underline}
     .body img,.cimg{max-width:calc(100%*var(--scale));border-radius:6px;margin:6px 0;display:block;cursor:zoom-in;transition:max-width .15s}
     .ch{font-size:16px;font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:14px}
     .cg{margin-bottom:14px}
@@ -248,7 +249,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .image-stage img{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;border-radius:6px}
 </style></head>
 <body>
-    <header class="post-toolbar" aria-label="帖子操作"><button id="favourite" title="收藏或取消收藏">☆ <span>收藏</span></button><button id="copyLink" title="复制帖子链接">⌁ <span>复制链接</span></button><button id="openBrowser" title="在浏览器中打开">↗ <span>浏览器</span></button><button id="jumpComments" title="跳转到评论区">☷ <span>评论</span></button><details class="reading-settings"><summary>阅读设置</summary><div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span class="ctrl-hint">点击图片查看器</span></div></details></header>
+    <header class="post-toolbar" aria-label="帖子操作"><button id="goBack" title="返回上一帖">← <span>返回</span></button><button id="goForward" title="前进到下一帖">→ <span>前进</span></button><button id="favourite" title="收藏或取消收藏">☆ <span>收藏</span></button><button id="copyLink" title="复制帖子链接">⌁ <span>复制链接</span></button><button id="openBrowser" title="在浏览器中打开原帖">↗ <span>原帖</span></button><button id="jumpComments" title="跳转到评论区">☷ <span>评论</span></button><details class="reading-settings"><summary>阅读设置</summary><div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span class="ctrl-hint">点击图片查看器</span></div></details></header>
     <main>
     <article>
     <h1>${escHtml(link.title || "无标题")}</h1>
@@ -270,16 +271,23 @@ var api=acquireVsCodeApi(),s=document.getElementById('s'),l=document.getElementB
 var v=localStorage.getItem('hb_img');if(v){s.value=v;r.style.setProperty('--scale',v/100);l.textContent=v+'%'}else {r.style.setProperty('--scale','.3');l.textContent='30%'};
 s.addEventListener('input',function(){var v=this.value;r.style.setProperty('--scale',v/100);l.textContent=v+'%';localStorage.setItem('hb_img',v)});
 
-document.getElementById('favourite').addEventListener('click',function(){api.postMessage({command:'toggleFavourite'});});
+document.getElementById('favourite').addEventListener('click',function(){this.disabled=true;this.textContent='正在同步…';api.postMessage({command:'toggleFavourite'});setTimeout(function(){var b=document.getElementById('favourite');if(b){b.disabled=false;b.innerHTML='☆ <span>收藏</span>';}},5000);});
+document.getElementById('goBack').addEventListener('click',function(){api.postMessage({command:'goBack'});});
+document.getElementById('goForward').addEventListener('click',function(){api.postMessage({command:'goForward'});});
 document.getElementById('copyLink').addEventListener('click',function(){api.postMessage({command:'copyLink'});});
 document.getElementById('openBrowser').addEventListener('click',function(){api.postMessage({command:'openInBrowser'});});
+document.querySelectorAll('.openOriginal').forEach(function(button){button.addEventListener('click',function(){api.postMessage({command:'openInBrowser'});});});
 document.getElementById('jumpComments').addEventListener('click',function(){var comments=document.querySelector('[aria-label="评论区"]');if(comments)comments.scrollIntoView({behavior:'smooth',block:'start'});});
 
 var main=document.querySelector('main');
 var savedScrollTop=sessionStorage.getItem('hb_scroll_top');
-if(main&&savedScrollTop!==null){
-  requestAnimationFrame(function(){main.scrollTop=Number(savedScrollTop);sessionStorage.removeItem('hb_scroll_top')});
+var persistedScrollTop=${Math.max(0, Math.floor(Number.isFinite(readPosition) ? readPosition : 0))};
+if(main&&(savedScrollTop!==null||persistedScrollTop>0)){
+  requestAnimationFrame(function(){main.scrollTop=savedScrollTop!==null?Number(savedScrollTop):persistedScrollTop;sessionStorage.removeItem('hb_scroll_top')});
 }
+var readPositionTimer=0;
+function saveReadPosition(){if(main)api.postMessage({command:'saveReadPosition',linkId:'${escHtml(String(link.linkid))}',position:Math.max(0,Math.floor(main.scrollTop))});}
+if(main){main.addEventListener('scroll',function(){clearTimeout(readPositionTimer);readPositionTimer=setTimeout(saveReadPosition,300)});window.addEventListener('beforeunload',saveReadPosition);}
 
 var viewer=document.getElementById('imageViewer'),viewerImage=document.getElementById('viewerImage'),imageStage=document.getElementById('imageStage'),loadOriginal=document.getElementById('loadOriginal'),imageStatus=document.getElementById('imageStatus'),imageSource='',imageIndex=0,lastFocused=null;
 function images(){return Array.prototype.slice.call(document.querySelectorAll('.body img,.cimg'));}

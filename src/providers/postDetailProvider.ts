@@ -13,6 +13,7 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
     private _currentPost: PostTreeResult | undefined;
     /** 被折叠评论的提示文案 */
     private _foldedTips: string = "";
+    private _readPosition = 0;
 
     constructor(
         private readonly extensionUri: vscode.Uri,
@@ -21,6 +22,7 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
         private readonly onRequestOriginalImage?: (url: string) => Promise<string>,
         private readonly onOpenOriginalImage?: (url: string) => void,
         private readonly onPostAction?: (action: string, post: PostTreeResult) => void,
+        private readonly onSaveReadPosition?: (linkId: string, position: number) => void,
     ) {}
 
     /**
@@ -36,13 +38,19 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
                 this.onLoadMoreComments?.(msg.linkId, typeof msg.rootId === "string" ? msg.rootId : undefined);
             }
             if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) void this.loadOriginalImage(msg.url);
-            if (["copyLink", "openInBrowser", "toggleFavourite"].includes(msg?.command) && this._currentPost) {
+            if (["copyLink", "openInBrowser", "toggleFavourite", "goBack", "goForward"].includes(msg?.command) && this._currentPost) {
                 this.onPostAction?.(msg.command, this._currentPost);
+            }
+            if (msg?.command === "saveReadPosition" && this._currentPost
+                && String(this._currentPost.link.linkid) === String(msg.linkId)
+                && Number.isFinite(msg.position) && msg.position >= 0) {
+                this._readPosition = Math.floor(msg.position);
+                this.onSaveReadPosition?.(String(msg.linkId), this._readPosition);
             }
         });
         webviewView.title = getPanelTitle();
         if (this._currentPost) {
-            this._view.webview.html = postHtml(this._currentPost, isStealth(), undefined, this._foldedTips);
+            this._view.webview.html = postHtml(this._currentPost, isStealth(), undefined, this._foldedTips, this._readPosition);
         } else {
             webviewView.webview.html = this.placeholderHtml();
         }
@@ -62,12 +70,13 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
      * @param commentNote 评论区底部的备注说明
      * @param foldedTips 被折叠评论的提示文案
      */
-    showPost(postTree: PostTreeResult, commentNote?: string, foldedTips?: string): void {
+    showPost(postTree: PostTreeResult, commentNote?: string, foldedTips?: string, readPosition = 0): void {
         this._currentPost = postTree;
         this._foldedTips = foldedTips || "";
+        this._readPosition = readPosition;
         if (this._view) {
             this._view.show?.(true);
-            this._view.webview.html = postHtml(postTree, isStealth(), commentNote, foldedTips);
+            this._view.webview.html = postHtml(postTree, isStealth(), commentNote, foldedTips, readPosition);
             this._view.title = isStealth() ? "README.md" : (postTree.link.title || "帖子");
         }
     }
@@ -75,7 +84,7 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
     /** 配置（主题、隐身模式等）变化后重新渲染已打开的详情。 */
     refreshCurrentPost(commentNote?: string): void {
         if (!this._currentPost || !this._view) return;
-        this._view.webview.html = postHtml(this._currentPost, isStealth(), commentNote, this._foldedTips);
+        this._view.webview.html = postHtml(this._currentPost, isStealth(), commentNote, this._foldedTips, this._readPosition);
         this._view.title = isStealth() ? "README.md" : (this._currentPost.link.title || "帖子");
     }
 

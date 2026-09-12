@@ -33,6 +33,18 @@ test("短暂服务异常按指数退避后重试", async () => {
     assert.deepEqual(delays, [100, 200]);
 });
 
+test("非幂等写入在临时错误后不会自动重试", async () => {
+    const coordinator = new RequestCoordinator({ sleep: async () => { throw new Error("不应等待重试"); } });
+    let calls = 0;
+    await assert.rejects(
+        coordinator.execute("POST /bbs/app/link/favour", false, async () => {
+            calls++;
+            throw new HeyBoxApiError("server", "temporary", true);
+        }, false),
+    );
+    assert.equal(calls, 1);
+});
+
 test("风控敏感接口串行执行", async () => {
     const coordinator = new RequestCoordinator({ maxConcurrent: 2, maxSensitiveConcurrent: 1 });
     let sensitiveActive = 0;
