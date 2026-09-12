@@ -305,10 +305,10 @@
           "steps": [
             {
               "id": "setupCookie",
-              "title": "1️⃣ 配置 Cookie",
-              "description": "点击侧边栏登录按钮，使用小黑盒 App 扫描二维码并在手机上确认即可登录。登录凭证会自动保存到 VS Code 安全存储中。\n\n若扫码异常，可在扫码面板选择“粘贴 Cookie”作为兼容兜底。",
+              "title": "1️⃣ 扫码登录",
+              "description": "点击侧边栏登录按钮，使用小黑盒 App 扫描二维码并在手机上确认即可登录。登录凭证会自动保存到 VS Code 安全存储中。\n\n若扫码异常，可在扫码面板选择手动输入 Cookie 作为兼容兜底。",
               "completionEvents": [
-                "onSettingChanged:heybox.cookie"
+                "onCommand:heybox.loginCompleted"
               ],
               "media": {
                 "markdown": "resources/walkthrough-cookie.md"
@@ -346,7 +346,7 @@
         "heybox.cookie": {
           "type": "string",
           "default": "",
-          "description": "旧版手动 Cookie 兼容项：首次读取时会迁移至 VS Code 安全存储并清空此明文设置；建议使用扫码登录或登录菜单导入"
+          "description": "旧版手动 Cookie 兼容项：首次读取时会迁移至 VS Code 安全存储并清空此明文设置；退出后不会自动重新导入，建议使用扫码登录或登录菜单导入"
         },
         "heybox.deviceId": {
           "type": "string",

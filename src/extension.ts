@@ -138,6 +138,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // ─── 命令注册 ───
     context.subscriptions.push(vscode.commands.registerCommand("heybox.openMessages", () => postListProvider!.switchTo("messages")));
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.loginCompleted", () => undefined));
 
     // 刷新帖子列表，重新加载配置
     context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", async () => { await client.loadConfig(); postListProvider!.refresh(); }));
@@ -775,6 +776,7 @@ function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, 
         if (notificationsEnabled(context)) startPolling(client, statusBarItem, context);
         else updateStatusBar(statusBarItem, 0, false);
     }
+    void vscode.commands.executeCommand("heybox.loginCompleted");
 }
 
 /**

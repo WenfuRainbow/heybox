@@ -28,7 +28,7 @@ HeyBox Forum 是一个非官方 VS Code 插件，让你不用离开编辑器，�
 2. 在侧边栏工具栏打开菜单，选择“登录”，再用小黑盒 App 扫码并在手机上确认。
 3. 开始逛推荐、进板块、搜帖子，或打开你的收藏和消息。
 
-登录状态过期后重新扫码即可。二维码失效时，在登录面板点击“刷新二维码”。如果遇到小黑盒服务端风控，请等待限制解除后再试；也可以先在浏览器完成人机验证，再手动导入 Cookie。插件不提供网页登录入口。
+登录状态过期后重新扫码即可。二维码失效时，在登录面板点击“刷新二维码”。如果遇到小黑盒服务端风控，请等待限制解除后再试；也可以先在浏览器完成人机验证，再手动导入 Cookie。退出登录会清除已保存的凭证，旧版设置中的 Cookie 也不会被自动重新导入。插件不提供网页登录入口。
 
 ## 你会用到的功能
 
@@ -84,7 +84,7 @@ macOS 下，`Ctrl+Shift+J` 和 `Ctrl+Shift+Enter` 分别对应 `Cmd+Shift+J`、`
 | `heybox.minimalMode` | `false` | 隐藏社交数据，使用简约列表 |
 | `heybox.postDetailLocation` | `sidebar` | 帖子详情位置：`sidebar` / `editor` / `beside` |
 | `heybox.theme` | `auto` | Webview 主题：`auto` / `dark` / `light` |
-| `heybox.cookie` | 空 | 旧版手动 Cookie 兼容项；首次读取时会迁移至 VS Code SecretStorage 并清空该设置，正常扫码无需设置 |
+| `heybox.cookie` | 空 | 旧版手动 Cookie 兼容项；首次读取时会迁移至 VS Code SecretStorage 并清空该设置。退出后不会自动重新导入，正常扫码无需设置 |
 | `heybox.deviceId` | 空 | 设备 ID；留空时插件自动生成并保存 |
 | `heybox.heyboxId` | 空 | 小黑盒用户 ID；通常从 Cookie 自动提取 |
 | `heybox.proxy` | 空 | HTTP/HTTPS 代理地址，例如 `http://127.0.0.1:7890`；留空即直连 |
