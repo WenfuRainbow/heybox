@@ -20,6 +20,7 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
         private readonly onLoadMoreComments?: (linkId: string, rootId?: string) => void,
         private readonly onRequestOriginalImage?: (url: string) => Promise<string>,
         private readonly onOpenOriginalImage?: (url: string) => void,
+        private readonly onPostAction?: (action: string, post: PostTreeResult) => void,
     ) {}
 
     /**
@@ -35,6 +36,9 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
                 this.onLoadMoreComments?.(msg.linkId, typeof msg.rootId === "string" ? msg.rootId : undefined);
             }
             if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) void this.loadOriginalImage(msg.url);
+            if (["copyLink", "openInBrowser", "toggleFavourite"].includes(msg?.command) && this._currentPost) {
+                this.onPostAction?.(msg.command, this._currentPost);
+            }
         });
         webviewView.title = getPanelTitle();
         if (this._currentPost) {

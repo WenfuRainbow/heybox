@@ -34,6 +34,8 @@
     "onCommand:heybox.switchToCategories",
     "onCommand:heybox.switchToFavorites",
     "onCommand:heybox.switchToMessages",
+    "onCommand:heybox.selectMode",
+    "onCommand:heybox.showMenu",
     "onCommand:heybox.login",
     "onCommand:heybox.logout",
     "onCommand:heybox.toggleFavourite",
@@ -82,27 +84,7 @@
           "group": "navigation"
         },
         {
-          "command": "heybox.toggleNotifications",
-          "when": "view == heybox.postList",
-          "group": "navigation"
-        },
-        {
-          "command": "heybox.markAllRead",
-          "when": "view == heybox.postList",
-          "group": "navigation"
-        },
-        {
-          "command": "heybox.login",
-          "when": "view == heybox.postList",
-          "group": "navigation"
-        },
-        {
-          "command": "heybox.logout",
-          "when": "view == heybox.postList",
-          "group": "navigation"
-        },
-        {
-          "command": "heybox.switchTheme",
+          "command": "heybox.showMenu",
           "when": "view == heybox.postList",
           "group": "navigation"
         }
@@ -155,6 +137,17 @@
       {
         "command": "heybox.switchToMessages",
         "title": "切换到消息中心",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.selectMode",
+        "title": "选择列表模式",
+        "category": "HeyBox"
+      },
+      {
+        "command": "heybox.showMenu",
+        "title": "打开菜单",
+        "icon": "$(ellipsis)",
         "category": "HeyBox"
       },
       {

@@ -204,13 +204,17 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     *{margin:0;padding:0;box-sizing:border-box}
     html,body{height:100%;overflow:hidden}
     body{font-family:var(--font);font-size:var(--fs);background:var(--bg);color:var(--fg);line-height:1.6;display:flex;flex-direction:column}
-    .ctrl{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim);padding:8px 24px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0}
+    .post-toolbar{display:flex;align-items:center;gap:6px;padding:8px 24px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0}
+    .post-toolbar button,.image-toolbar button{border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--fg);padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
+    .post-toolbar button:hover,.image-toolbar button:hover{background:var(--badge-bg);color:var(--badge-fg)}
+    .reading-settings{margin-left:auto;color:var(--dim);font-size:12px}.reading-settings summary{cursor:pointer;user-select:none}.reading-settings[open]{position:relative}.reading-settings>div{position:absolute;right:0;top:24px;z-index:2;width:250px;padding:10px;border:1px solid var(--border);border-radius:5px;background:var(--bg);box-shadow:0 3px 12px rgba(0,0,0,.2)}
+    .ctrl{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim)}
     main{flex:1;overflow-y:auto;padding:16px 24px}
     main>article,main>section{max-width:820px;margin-left:auto;margin-right:auto}
     .ctrl label{white-space:nowrap}
     .ctrl input{flex:1;max-width:160px;accent-color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer}
     .ctrl-hint{white-space:nowrap}
-    @media (max-width:480px){.ctrl{gap:6px;padding:6px 12px}.ctrl-hint{display:none}main{padding:12px}.cm{gap:7px}.cm.sub{margin-left:20px}.loadReplies,.loadMoreComments{margin-left:20px}h1{font-size:19px}}
+    @media (max-width:480px){.post-toolbar{gap:4px;padding:6px 12px}.post-toolbar button{padding:4px 5px}.post-toolbar button span{display:none}.reading-settings>div{right:0}.ctrl{gap:6px}.ctrl-hint{display:none}main{padding:12px}.cm{gap:7px}.cm.sub{margin-left:20px}.loadReplies,.loadMoreComments{margin-left:20px}h1{font-size:19px}}
     h1{font-size:22px;font-weight:700;margin-bottom:10px}
     .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
     .tags{font-size:12px;color:var(--dim);margin-bottom:8px}
@@ -238,14 +242,13 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .image-viewer{position:fixed;z-index:10;inset:0;display:none;flex-direction:column;background:var(--bg)}
     .image-viewer.open{display:flex}
     .image-toolbar{display:flex;align-items:center;gap:6px;padding:8px;border-bottom:1px solid var(--border);flex-shrink:0}
-    .image-toolbar button{border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--fg);padding:4px 7px;font:inherit;font-size:12px;cursor:pointer}
-    .image-toolbar button:hover{background:var(--badge-bg);color:var(--badge-fg)}.image-toolbar button:disabled{opacity:.65;cursor:wait}
+    .image-toolbar button:disabled{opacity:.65;cursor:wait}
     .image-status{margin-left:auto;color:var(--dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
     .image-stage{flex:1;overflow:auto;padding:12px}
     .image-stage img{display:block;width:auto;max-width:100%;height:auto;margin:0 auto;border-radius:6px}
 </style></head>
 <body>
-    <div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span class="ctrl-hint">点击图片可在编辑区查看大图</span></div>
+    <header class="post-toolbar" aria-label="帖子操作"><button id="favourite" title="收藏或取消收藏">☆ <span>收藏</span></button><button id="copyLink" title="复制帖子链接">⌁ <span>复制链接</span></button><button id="openBrowser" title="在浏览器中打开">↗ <span>浏览器</span></button><button id="jumpComments" title="跳转到评论区">☷ <span>评论</span></button><details class="reading-settings"><summary>阅读设置</summary><div class="ctrl"><label for="s">图片</label><input type="range" id="s" min="5" max="100" value="30" aria-label="图片缩放比例"/><span id="sl" aria-live="polite">30%</span><span class="ctrl-hint">点击图片查看器</span></div></details></header>
     <main>
     <article>
     <h1>${escHtml(link.title || "无标题")}</h1>
@@ -260,12 +263,17 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     ${commentNote ? `<div class="ftr" style="font-style:italic">${escHtml(commentNote)}</div>` : `<div class="ftr">${commentCount} 条评论${foldedTips ? '（已折叠）' : ''}</div>`}
     </section>
     </main>
-    <section id="imageViewer" class="image-viewer" aria-label="图片查看器" aria-hidden="true"><div class="image-toolbar"><button id="closeImage" title="关闭图片查看器">关闭</button><button id="loadOriginal">加载原图</button><span id="imageStatus" class="image-status">当前为展示图</span></div><div id="imageStage" class="image-stage"><img id="viewerImage" alt="帖子图片"></div></section>
+    <section id="imageViewer" class="image-viewer" aria-label="图片查看器" aria-hidden="true"><div class="image-toolbar"><button id="closeImage" title="关闭图片查看器 (Esc)">关闭</button><button id="previousImage" title="上一张 (←)">上一张</button><button id="nextImage" title="下一张 (→)">下一张</button><button id="loadOriginal">加载原图</button><span id="imageStatus" class="image-status">当前为展示图</span></div><div id="imageStage" class="image-stage"><img id="viewerImage" alt="帖子图片"></div></section>
 <script nonce="${nonce}">
 (function(){
 var api=acquireVsCodeApi(),s=document.getElementById('s'),l=document.getElementById('sl'),r=document.documentElement;
 var v=localStorage.getItem('hb_img');if(v){s.value=v;r.style.setProperty('--scale',v/100);l.textContent=v+'%'}else {r.style.setProperty('--scale','.3');l.textContent='30%'};
 s.addEventListener('input',function(){var v=this.value;r.style.setProperty('--scale',v/100);l.textContent=v+'%';localStorage.setItem('hb_img',v)});
+
+document.getElementById('favourite').addEventListener('click',function(){api.postMessage({command:'toggleFavourite'});});
+document.getElementById('copyLink').addEventListener('click',function(){api.postMessage({command:'copyLink'});});
+document.getElementById('openBrowser').addEventListener('click',function(){api.postMessage({command:'openInBrowser'});});
+document.getElementById('jumpComments').addEventListener('click',function(){var comments=document.querySelector('[aria-label="评论区"]');if(comments)comments.scrollIntoView({behavior:'smooth',block:'start'});});
 
 var main=document.querySelector('main');
 var savedScrollTop=sessionStorage.getItem('hb_scroll_top');
@@ -278,7 +286,7 @@ function images(){return Array.prototype.slice.call(document.querySelectorAll('.
 function showImage(index){var all=images();if(!all.length)return;imageIndex=(index+all.length)%all.length;var img=all[imageIndex];imageSource=img.currentSrc||img.src;viewerImage.src=imageSource;viewerImage.alt=img.alt||'帖子图片';imageStatus.textContent=(imageIndex+1)+' / '+all.length+' · 当前为展示图';loadOriginal.disabled=false;loadOriginal.textContent='加载原图';imageStage.scrollTop=0;imageStage.scrollLeft=0;}
 function closeImage(){if(!viewer.classList.contains('open'))return;viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');if(lastFocused&&lastFocused.focus)lastFocused.focus();}
 document.addEventListener('click',function(e){var t=e.target;if(t.tagName==='IMG'&&t.matches('.body img,.cimg')){lastFocused=t;showImage(images().indexOf(t));viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');document.getElementById('closeImage').focus();}});
-document.getElementById('closeImage').addEventListener('click',closeImage);document.addEventListener('keydown',function(e){if(!viewer.classList.contains('open'))return;if(e.key==='Escape'){e.preventDefault();closeImage()}else if(e.key==='ArrowLeft'){e.preventDefault();showImage(imageIndex-1)}else if(e.key==='ArrowRight'){e.preventDefault();showImage(imageIndex+1)}});
+document.getElementById('closeImage').addEventListener('click',closeImage);document.getElementById('previousImage').addEventListener('click',function(){showImage(imageIndex-1)});document.getElementById('nextImage').addEventListener('click',function(){showImage(imageIndex+1)});viewerImage.addEventListener('error',function(){imageStatus.textContent='图片加载失败，可切换图片或重试原图';loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';});document.addEventListener('keydown',function(e){if(!viewer.classList.contains('open'))return;if(e.key==='Escape'){e.preventDefault();closeImage()}else if(e.key==='ArrowLeft'){e.preventDefault();showImage(imageIndex-1)}else if(e.key==='ArrowRight'){e.preventDefault();showImage(imageIndex+1)}});
 loadOriginal.addEventListener('click',function(){if(!imageSource)return;loadOriginal.disabled=true;loadOriginal.textContent='正在加载…';imageStatus.textContent='正在请求原图…';api.postMessage({command:'loadOriginalImage',url:imageSource});});
 window.addEventListener('message',function(event){var data=event.data||{};if(data.command==='originalImageOpened'&&viewer.classList.contains('open')){closeImage();return}if(data.command==='originalImage'&&viewer.classList.contains('open')){viewerImage.src=data.url;loadOriginal.textContent='已加载原图';imageStatus.textContent='正在显示原图';return}if(data.command==='originalImageError'&&viewer.classList.contains('open')){loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';imageStatus.textContent='原图加载失败：'+(data.message||'未知错误')}});
 document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';api.postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});

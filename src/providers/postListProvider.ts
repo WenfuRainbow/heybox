@@ -12,6 +12,7 @@ interface MessageEntry {
     detail: string;
     timestamp?: number;
     linkId?: string;
+    unread?: boolean;
 }
 
 interface MessagePageState {
@@ -20,6 +21,7 @@ interface MessagePageState {
     cursor: string;
     hasMore: boolean;
     loading: boolean;
+    error?: string;
 }
 
 const FAV_KEY = "heybox.favorites";          // 全局状态中收藏夹的存储键
@@ -106,6 +108,7 @@ export class PostListProvider
     private feedLoading: boolean = false;
     /** 推荐流是否还有下一页。 */
     private feedHasMore: boolean = true;
+    private feedError: string | undefined;
     /** 每个板块是否还有下一页。 */
     private topicHasMore: Map<number, boolean> = new Map();
 
@@ -118,6 +121,9 @@ export class PostListProvider
     private favouritesLoaded = false;
     private favouritesHasMore = true;
     private favouritesLoading = false;
+    private favouritesError: string | undefined;
+    private topicsError: string | undefined;
+    private readonly topicErrors = new Map<number, string>();
 
     /** 消息中心的六个分页流，避免切换分类时重复请求。 */
     private readonly messagePages = new Map<MessageSection, MessagePageState>();
@@ -173,11 +179,15 @@ export class PostListProvider
         this.feedPosts = [];
         this.feedOffset = 0;
         this.feedHasMore = true;
+        this.feedError = undefined;
+        this.topicsError = undefined;
+        this.topicErrors.clear();
         this.favCache.clear();
         this.favouritePosts = [];
         this.favouriteOffset = 0;
         this.favouritesLoaded = false;
         this.favouritesHasMore = true;
+        this.favouritesError = undefined;
         this.messagePages.clear();
         this._onDidChangeTreeData.fire();
     }
@@ -262,31 +272,30 @@ export class PostListProvider
     async getChildren(element?: TreeItemBase): Promise<TreeItemBase[]> {
         if (this.searchMode) return this.getSearchChildren(element);
         if (!element) {
-            const tabs: TreeItemBase[] = [
-                new TabItem("recommend", this.viewMode === "recommend"),
-                new TabItem("categories", this.viewMode === "categories"),
-                new TabItem("favorites", this.viewMode === "favorites"),
-                new TabItem("messages", this.viewMode === "messages"),
-            ];
+            // 原生 TreeView 不适合模拟四个横向标签。只保留一个模式入口，
+            // 让实际内容紧跟在下面，给窄侧边栏留出更多垂直空间。
+            const tabs: TreeItemBase[] = [new ModeSelectorItem(this.viewMode)];
             if (this.viewMode === "recommend") {
-                if (this.feedPosts.length === 0 && !this.feedLoading) await this.fetchFeed();
-                tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
+                if (this.feedPosts.length === 0 && !this.feedLoading && !this.feedError) await this.fetchFeed();
+                tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx)));
                 if (this.feedLoading) tabs.push(new BusyItem("正在加载推荐..."));
+                else if (this.feedError) tabs.push(new RetryItem(`加载推荐失败：${this.feedError}`));
                 else if (this.feedHasMore) tabs.push(new LoadMoreFeedItem());
                 else if (this.feedPosts.length === 0) tabs.push(new TabEmptyItem("暂无推荐帖子"));
             } else if (this.viewMode === "favorites") {
-                if (!this.favouritesLoaded && !this.favouritesLoading) await this.fetchFavourites();
+                if (!this.favouritesLoaded && !this.favouritesLoading && !this.favouritesError) await this.fetchFavourites();
                 if (this.favouritePosts.length === 0) {
-                    tabs.push(new TabEmptyItem("暂无云端收藏"));
+                    tabs.push(this.favouritesError ? new RetryItem(`加载收藏失败：${this.favouritesError}`) : new TabEmptyItem("暂无云端收藏"));
                 } else {
-                    tabs.push(...this.favouritePosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
+                    tabs.push(...this.favouritePosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx, true)));
                     if (this.favouritesHasMore) tabs.push(new LoadMoreFavouritesItem());
                 }
             } else if (this.viewMode === "messages") {
                 tabs.push(...MESSAGE_SECTIONS.map((section) => new MessageSectionItem(section)));
             } else {
-                if (this.topics.length === 0) await this.fetchTopics();
-                tabs.push(...this.topics.map((t) => new TopicItem(t,
+                if (this.topics.length === 0 && !this.topicsError) await this.fetchTopics();
+                if (this.topicsError) tabs.push(new RetryItem(`加载板块失败：${this.topicsError}`));
+                else tabs.push(...this.topics.map((t) => new TopicItem(t,
                     (this.topicPosts.has(t.topic_id) || this.expandedTopics.has(t.topic_id))
                         ? vscode.TreeItemCollapsibleState.Expanded
                         : vscode.TreeItemCollapsibleState.Collapsed)));
@@ -295,9 +304,10 @@ export class PostListProvider
         }
         if (element instanceof TopicItem) {
             const tid = element.topic.topic_id;
-            if (!this.topicPosts.has(tid)) await this.fetchTopicPosts(tid);
-            const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache));
+            if (!this.topicPosts.has(tid) && !this.topicErrors.has(tid)) await this.fetchTopicPosts(tid);
+            const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx));
             if (this.loadingTopicsSet.has(tid)) items.push(new BusyItem("正在加载帖子..."));
+            else if (this.topicErrors.has(tid)) items.push(new RetryItem(`加载帖子失败：${this.topicErrors.get(tid)}`));
             else if (this.topicHasMore.get(tid) !== false) items.push(new LoadMoreTopicItem(tid));
             else if (items.length === 0) items.push(new TabEmptyItem("暂无帖子"));
             return items;
@@ -309,7 +319,7 @@ export class PostListProvider
             }
             const current = this.messagePages.get(element.section);
             if (!current || current.entries.length === 0) {
-                return [new TabEmptyItem("暂无消息")];
+                return [current?.error ? new RetryItem(`加载消息失败：${current.error}`) : new TabEmptyItem("暂无消息")];
             }
             const items: TreeItemBase[] = current.entries.map((entry) => new MessageEntryItem(entry));
             if (current.hasMore) items.push(new LoadMoreMessagesItem(element.section));
@@ -324,7 +334,7 @@ export class PostListProvider
             if (this.searchLoading) items.push(new BusyItem("搜索中..."));
             else if (this.searchError) items.push(new TabEmptyItem(`搜索失败：${this.searchError}`));
             else if (this.searchResults.length === 0) items.push(new TabEmptyItem("没有找到相关帖子"));
-            items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
+            items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache, this.ctx)));
             if (this.searchResults.length > 0 && this.searchHasMore) items.push(new LoadMoreSearchItem());
             return items;
         }
@@ -348,7 +358,7 @@ export class PostListProvider
             this.feedPosts.push(...added);
             this.feedOffset += page.length;
             this.feedHasMore = page.length > 0 && added.length > 0;
-        } catch (e) { vscode.window.showErrorMessage(`获取推荐失败: ${(e as Error).message}`); }
+        } catch (e) { this.feedError = (e as Error).message || "未知错误"; }
         finally { this.feedLoading = false; }
         this.fetchFavCounts(this.feedPosts);
     }
@@ -359,7 +369,7 @@ export class PostListProvider
         this.loadingTopics = true;
         try {
             this.topics = (await this.client.getTopicCategories()).latest_hot_topics?.children || [];
-        } catch (e) { vscode.window.showErrorMessage(`获取话题列表失败: ${(e as Error).message}`); }
+        } catch (e) { this.topicsError = (e as Error).message || "未知错误"; }
         finally { this.loadingTopics = false; }
     }
 
@@ -384,7 +394,7 @@ export class PostListProvider
             this.topicPosts.set(topicId, existing.concat(added));
             this.topicOffsets.set(topicId, offset + page.length);
             this.topicHasMore.set(topicId, page.length > 0 && added.length > 0 && page.length >= 30);
-        } catch (e) { vscode.window.showErrorMessage(`获取帖子列表失败: ${(e as Error).message}`); }
+        } catch (e) { this.topicErrors.set(topicId, (e as Error).message || "未知错误"); }
         finally { this.loadingTopicsSet.delete(topicId); }
         this.fetchFavCounts(this.topicPosts.get(topicId) || []);
     }
@@ -408,7 +418,7 @@ export class PostListProvider
                 this.favouritesHasMore = false;
                 this.favouritesLoaded = true;
             }
-            vscode.window.showErrorMessage(`获取云端收藏失败: ${(e as Error).message}`);
+            this.favouritesError = (e as Error).message || "未知错误";
         } finally {
             this.favouritesLoading = false;
         }
@@ -445,7 +455,7 @@ export class PostListProvider
             state.cursor = cursor;
             state.hasMore = entries.length === 20 && added.length > 0;
         } catch (e) {
-            vscode.window.showErrorMessage(`获取${MESSAGE_SECTION_LABELS[section]}失败: ${(e as Error).message}`);
+            state.error = (e as Error).message || "未知错误";
             state.hasMore = false;
         } finally {
             state.loading = false;
@@ -467,6 +477,7 @@ export class PostListProvider
             detail: this.formatTime(stamp),
             timestamp: stamp,
             linkId: linkId || undefined,
+            unread: this.isUnread(message),
         };
     }
 
@@ -479,6 +490,7 @@ export class PostListProvider
             title: `${sender}: ${title}`,
             detail: this.formatTime(stamp),
             timestamp: stamp,
+            unread: this.isUnread(message),
         };
     }
 
@@ -491,7 +503,27 @@ export class PostListProvider
             title: summary,
             detail: message.datetime || this.formatTime(stamp),
             timestamp: stamp,
+            unread: this.isUnread(message),
         };
+    }
+
+    /** 接口字段命名不统一；只在明确表示未读时加标识，避免误标历史消息。 */
+    private isUnread(message: {
+        is_read?: string | number | boolean;
+        has_read?: string | number | boolean;
+        is_unread?: string | number | boolean;
+        unread?: string | number | boolean;
+        read_status?: string | number | boolean;
+    }): boolean {
+        const value = (input: unknown) => String(input ?? "").trim().toLowerCase();
+        const isUnread = (input: unknown) => ["1", "true", "yes", "unread"].includes(value(input));
+        const isRead = (input: unknown) => ["0", "false", "no", "read"].includes(value(input));
+        if (message.is_unread !== undefined) return isUnread(message.is_unread);
+        if (message.unread !== undefined) return isUnread(message.unread);
+        if (message.is_read !== undefined) return !isRead(message.is_read);
+        if (message.has_read !== undefined) return !isRead(message.has_read);
+        if (message.read_status !== undefined) return !isRead(message.read_status);
+        return false;
     }
 
     private formatTime(timestamp?: number): string {
@@ -574,26 +606,21 @@ export class SearchHeaderItem extends TreeItemBase {
     }
 }
 
-/** 视图模式切换 Tab，激活态显示不同图标和标记。 */
-export class TabItem extends TreeItemBase {
-    constructor(mode: ViewMode, active: boolean) {
-        const labels: Record<ViewMode, [string, string]> = {
-            recommend: ["📌 推荐", "推荐"],
-            categories: ["📁 板块", "板块"],
-            favorites: ["⭐ 收藏", "收藏"],
-            messages: ["🔔 消息", "消息"],
+/** 一个紧凑的模式选择入口，避免四个固定导航节点占满列表首屏。 */
+export class ModeSelectorItem extends TreeItemBase {
+    constructor(mode: ViewMode) {
+        const labels: Record<ViewMode, string> = {
+            recommend: "推荐",
+            categories: "板块",
+            favorites: "收藏",
+            messages: "消息",
         };
-        const [activeLabel, inactiveLabel] = labels[mode];
-        super(active ? activeLabel : inactiveLabel, vscode.TreeItemCollapsibleState.None);
-        if (active) {
-            this.iconPath = new vscode.ThemeIcon(mode === "favorites" ? "star" : mode === "messages" ? "bell" : mode === "recommend" ? "flame" : "folder-active");
-            this.description = "● 当前";
-        } else {
-            this.iconPath = new vscode.ThemeIcon(mode === "favorites" ? "star-empty" : mode === "messages" ? "bell" : mode === "recommend" ? "flame" : "folder");
-            const cmds: Record<ViewMode, string> = { recommend: "heybox.switchToRecommend", categories: "heybox.switchToCategories", favorites: "heybox.switchToFavorites", messages: "heybox.switchToMessages" };
-            this.command = { command: cmds[mode], title: "切换" };
-        }
-        this.contextValue = "tab";
+        super(labels[mode], vscode.TreeItemCollapsibleState.None);
+        this.description = "切换";
+        this.tooltip = `当前列表：${labels[mode]}。点击切换。`;
+        this.command = { command: "heybox.selectMode", title: "选择列表模式" };
+        this.contextValue = "modeSelector";
+        this.iconPath = new vscode.ThemeIcon(mode === "favorites" ? "star" : mode === "messages" ? "bell" : mode === "recommend" ? "flame" : "folder");
     }
 }
 
@@ -611,17 +638,18 @@ export class TopicItem extends TreeItemBase {
 /** 帖子树节点，显示标题、收藏数和评论数，点击打开帖子详情 */
 export class PostItem extends TreeItemBase {
     public readonly post: SearchItemInfo;
-    constructor(post: SearchItemInfo, collapsibleState: vscode.TreeItemCollapsibleState, favCache?: Map<number, number>) {
+    constructor(post: SearchItemInfo, collapsibleState: vscode.TreeItemCollapsibleState, favCache?: Map<number, number>, context?: vscode.ExtensionContext, forceFavourite = false) {
         const label = post.title || post.description?.substring(0, 40) || "无标题";
         super(label, collapsibleState);
         this.post = post;
         const fav = favCache?.get(post.linkid);
         const minimal = vscode.workspace.getConfiguration("heybox").get<boolean>("minimalMode", false);
         if (!minimal) this.description = fav !== undefined ? `⭐${fav} 💬${post.comment_num}` : `💬${post.comment_num}`;
-        this.tooltip = new vscode.MarkdownString(`**${label}**\n\n${post.description?.substring(0, 100) || ""}\n\n${fav !== undefined ? '收藏: ' + fav + ' | ' : ''}评论: ${post.comment_num}\n话题: ${post.topics?.map((t) => t.name).join(", ") || "无"}`);
+        const favourited = forceFavourite || getFavs(context).some((item) => item.linkid === post.linkid);
+        this.tooltip = new vscode.MarkdownString(`**${label}**\n\n${post.description?.substring(0, 100) || ""}\n\n${favourited ? "已收藏 | " : ""}${fav !== undefined ? '收藏: ' + fav + ' | ' : ''}评论: ${post.comment_num}\n话题: ${post.topics?.map((t) => t.name).join(", ") || "无"}`);
         this.command = { command: "heybox.openPost", title: "打开帖子", arguments: [post] };
         this.contextValue = "post";
-        this.iconPath = minimal ? new vscode.ThemeIcon("file") : new vscode.ThemeIcon("comment-discussion");
+        this.iconPath = minimal ? new vscode.ThemeIcon("file") : new vscode.ThemeIcon(favourited ? "star-full" : "comment-discussion");
     }
 }
 
@@ -641,6 +669,17 @@ export class TabEmptyItem extends TreeItemBase {
         super(msg, vscode.TreeItemCollapsibleState.None);
         this.iconPath = new vscode.ThemeIcon("info");
         this.contextValue = "empty";
+    }
+}
+
+/** 区域内失败反馈；点击只刷新当前原生视图，不再依赖通知弹窗。 */
+export class RetryItem extends TreeItemBase {
+    constructor(message: string) {
+        super(message, vscode.TreeItemCollapsibleState.None);
+        this.command = { command: "heybox.refreshList", title: "重试加载" };
+        this.contextValue = "retry";
+        this.iconPath = new vscode.ThemeIcon("refresh");
+        this.tooltip = "点击重试";
     }
 }
 
@@ -698,10 +737,10 @@ export class MessageSectionItem extends TreeItemBase {
 export class MessageEntryItem extends TreeItemBase {
     constructor(entry: MessageEntry) {
         super(entry.title, vscode.TreeItemCollapsibleState.None);
-        this.description = entry.detail;
-        this.tooltip = entry.detail ? `${entry.title}\n${entry.detail}` : entry.title;
+        this.description = entry.unread ? `● 未读${entry.detail ? ` · ${entry.detail}` : ""}` : entry.detail;
+        this.tooltip = entry.unread ? `${entry.title}\n未读${entry.detail ? ` · ${entry.detail}` : ""}` : (entry.detail ? `${entry.title}\n${entry.detail}` : entry.title);
         this.contextValue = "message";
-        this.iconPath = new vscode.ThemeIcon("mail");
+        this.iconPath = new vscode.ThemeIcon(entry.unread ? "mail-unread" : "mail");
         if (entry.linkId) {
             this.command = {
                 command: "heybox.openPost",

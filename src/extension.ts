@@ -118,7 +118,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
                 });
             }
         }
-    }, (url) => client.getOriginalImageUrl(url), openOriginalImagePreview);
+    }, (url) => client.getOriginalImageUrl(url), openOriginalImagePreview, (action, post) => {
+        void handleDetailAction(action, post);
+    });
     context.subscriptions.push(vscode.window.registerWebviewViewProvider(PostDetailViewProvider.viewType, postDetailProvider));
 
     // 应用隐身模式设置
@@ -160,6 +162,38 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 切换到消息中心
     context.subscriptions.push(vscode.commands.registerCommand("heybox.switchToMessages", () => postListProvider!.switchTo("messages")));
+
+    // 原生 TreeView 使用一个入口切换模式，避免四个固定节点挤占侧边栏首屏。
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.selectMode", async () => {
+        const current = postListProvider!.getViewMode();
+        const picked = await vscode.window.showQuickPick([
+            { label: "$(flame) 推荐", value: "recommend", description: current === "recommend" ? "当前" : "" },
+            { label: "$(folder) 板块", value: "categories", description: current === "categories" ? "当前" : "" },
+            { label: "$(star) 收藏", value: "favorites", description: current === "favorites" ? "当前" : "" },
+            { label: "$(bell) 消息", value: "messages", description: current === "messages" ? "当前" : "" },
+        ], { placeHolder: "选择列表模式" });
+        if (picked) postListProvider!.switchTo(picked.value as "recommend" | "categories" | "favorites" | "messages");
+    }));
+
+    // 账号和阅读设置收进一个轻量菜单，工具栏保持搜索、刷新和菜单三个入口。
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.showMenu", async () => {
+        const loggedIn = !!client.getCookie();
+        const choices: Array<{ label: string; command: string }> = [
+            { label: "$(list-selection) 切换列表模式", command: "heybox.selectMode" },
+            { label: "$(symbol-color) 阅读主题", command: "heybox.switchTheme" },
+            { label: "$(settings-gear) 打开设置", command: "workbench.action.openSettings" },
+        ];
+        if (loggedIn) {
+            choices.splice(1, 0,
+                { label: "$(bell) 消息提醒", command: "heybox.toggleNotifications" },
+                { label: "$(sign-out) 退出登录", command: "heybox.logout" },
+            );
+        } else {
+            choices.splice(1, 0, { label: "$(sign-in) 登录", command: "heybox.login" });
+        }
+        const picked = await vscode.window.showQuickPick(choices, { placeHolder: "HeyBox 菜单" });
+        if (picked) await vscode.commands.executeCommand(picked.command, picked.command === "workbench.action.openSettings" ? "heybox" : undefined);
+    }));
 
     // 加载更多搜索结果
     context.subscriptions.push(vscode.commands.registerCommand("heybox.loadMoreSearch", async () => postListProvider!.loadMoreSearch()));
@@ -465,6 +499,10 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
                         void loadOriginalImage(client, panel.webview, msg.url);
                         return;
                     }
+                    if (["copyLink", "openInBrowser", "toggleFavourite"].includes(msg?.command) && currentPanelPost) {
+                        void handleDetailAction(msg.command, currentPanelPost);
+                        return;
+                    }
                     if ((msg?.command !== "loadReplies" && msg?.command !== "loadMoreComments") || typeof msg.linkId !== "string") return;
                     if (currentPanel !== panel || !currentPanelPost) return;
                     const postAtRequest = currentPanelPost;
@@ -497,6 +535,41 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             const message = e instanceof Error ? e.message : "未知错误";
             vscode.window.showErrorMessage(`获取帖子详情失败: ${message}`);
         }
+    }
+}
+
+/** 处理详情页工具栏动作；同一逻辑同时服务侧边栏 Webview 与编辑区 Webview。 */
+async function handleDetailAction(action: string, post: PostTreeResult): Promise<void> {
+    const url = `https://www.xiaoheihe.cn/app/bbs/link/${post.link.linkid}`;
+    if (action === "copyLink") {
+        await vscode.env.clipboard.writeText(url);
+        void vscode.window.setStatusBarMessage("小黑盒帖子链接已复制", 2000);
+        return;
+    }
+    if (action === "openInBrowser") {
+        await vscode.env.openExternal(vscode.Uri.parse(url));
+        return;
+    }
+    if (action === "toggleFavourite") {
+        const item: SearchItemInfo = {
+            linkid: post.link.linkid,
+            userid: post.link.user.userid,
+            title: post.link.title,
+            description: post.link.description,
+            link_type: post.link.link_type,
+            link_tag: post.link.link_tag,
+            is_web: 1,
+            comment_num: post.link.comment_num,
+            favour_count: post.link.favour_count,
+            create_at: post.link.create_at,
+            modify_at: post.link.modify_at,
+            share_url: post.link.share_url,
+            up: post.link.up,
+            down: post.link.down,
+            topics: post.link.topics,
+            has_video: post.link.has_video || 0,
+        };
+        await vscode.commands.executeCommand("heybox.toggleFavourite", item);
     }
 }
 
