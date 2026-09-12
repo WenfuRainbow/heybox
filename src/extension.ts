@@ -11,6 +11,7 @@
  * - 隐身模式
  */
 import * as vscode from "vscode";
+import * as crypto from "crypto";
 import { HeyBoxClient } from "./api/client";
 import { isAuthenticationError, isCaptchaError } from "./api/errors";
 import { PostListProvider } from "./providers/postListProvider";
@@ -747,7 +748,8 @@ function openOriginalImagePreview(url: string): void {
 
 function originalImageHtml(url: string): string {
     const escapedUrl = url.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#039;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline';"><style>body{margin:0;padding:20px;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground)}img{display:block;width:100%;height:auto;margin:auto;border-radius:6px}</style></head><body><img src="${escapedUrl}" alt="原图"></body></html>`;
+    const nonce = crypto.randomBytes(16).toString("base64");
+    return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'nonce-${nonce}';"><style nonce="${nonce}">body{margin:0;padding:20px;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground)}img{display:block;width:100%;height:auto;margin:auto;border-radius:6px}</style></head><body><img src="${escapedUrl}" alt="原图"></body></html>`;
 }
 
 function isSupportedImageUrl(value: unknown): value is string {

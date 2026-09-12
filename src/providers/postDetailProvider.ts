@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as crypto from "crypto";
 import { PostTreeResult } from "../types";
 import { postHtml } from "../utils/htmlRenderer";
 
@@ -90,7 +91,8 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
 
     /** 未选中帖子时的占位 HTML 页面 */
     private placeholderHtml(): string {
-        return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><style>body{font-family:var(--vscode-font-family);color:var(--vscode-descriptionForeground);padding:16px;text-align:center;font-size:13px}</style></head><body><p>点击帖子查看详情</p></body></html>`;
+        const nonce = crypto.randomBytes(16).toString("base64");
+        return `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}';"><style nonce="${nonce}">body{font-family:var(--vscode-font-family);color:var(--vscode-descriptionForeground);padding:16px;text-align:center;font-size:13px}</style></head><body><p>点击帖子查看详情</p></body></html>`;
     }
 
     private async loadOriginalImage(imageUrl: string): Promise<void> {

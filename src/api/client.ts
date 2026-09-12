@@ -8,6 +8,7 @@ import * as https from "https";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { generateSignature, Signature } from "./signature";
 import { HeyBoxApiError, apiErrorFromHttpStatus, unwrapApiResponse } from "./errors";
+import { validateLinksResult, validateMessageList, validatePostTree, validateSearchResult } from "./contracts";
 import { RequestCoordinator, isSensitiveApiPath } from "./requestPolicy";
 import { BrowserNetworkClient, findBrowserExecutablePath } from "./browserClient";
 import {
@@ -337,9 +338,12 @@ export class HeyBoxClient {
      * @param params 查询参数
      * @returns 解析后的业务数据
      */
-    private async get<T>(path: string, params?: Record<string, string>): Promise<T> {
+    private async get<T>(path: string, params?: Record<string, string>, validate?: (result: unknown) => T): Promise<T> {
         this.requireCookie();
-        return this.request<T>("GET", path, params, undefined, unwrapApiResponse<T>);
+        return this.request<T>("GET", path, params, undefined, (payload) => {
+            const result = unwrapApiResponse<unknown>(payload);
+            return validate ? validate(result) : result as T;
+        });
     }
 
     private requireCookie(): void {
@@ -513,7 +517,7 @@ export class HeyBoxClient {
         const p: Record<string, string> = { link_id: linkId, offset: String(offset) };
         p.limit = limit > 0 ? String(limit) : "100";
         if (sortFilter) p.sort_filter = sortFilter;
-        return this.get<PostTreeResult>("/bbs/app/link/tree", p);
+        return this.get<PostTreeResult>("/bbs/app/link/tree", p, validatePostTree);
     }
 
     /**
@@ -560,7 +564,7 @@ export class HeyBoxClient {
                 offset: String(offset),
                 limit: String(limit),
                 dw: "800",
-            },
+            }, validateSearchResult,
         );
         const rawItems = result.items || [];
         const items = rawItems
@@ -583,7 +587,7 @@ export class HeyBoxClient {
      * @returns 话题动态列表
      */
     async getTopicFeeds(topicId: number, offset: number = 0, limit: number = 30): Promise<{ links: SearchItemInfo[]; lastval: string }> {
-        return this.get<{ links: SearchItemInfo[]; lastval: string }>("/bbs/app/topic/feeds", { topic_id: String(topicId), offset: String(offset), limit: String(limit) });
+        return this.get<{ links: SearchItemInfo[]; lastval: string }>("/bbs/app/topic/feeds", { topic_id: String(topicId), offset: String(offset), limit: String(limit) }, (result) => validateLinksResult(result, "话题动态") as { links: SearchItemInfo[]; lastval: string });
     }
 
     /**
@@ -593,7 +597,7 @@ export class HeyBoxClient {
      * @returns 首页动态列表
      */
     async getFeed(offset: number = 0, pull: string = "0"): Promise<{ links: SearchItemInfo[] }> {
-        return this.get<{ links: SearchItemInfo[] }>("/bbs/app/feeds", { offset: String(offset), pull, dw: "800" });
+        return this.get<{ links: SearchItemInfo[] }>("/bbs/app/feeds", { offset: String(offset), pull, dw: "800" }, (result) => validateLinksResult(result, "推荐动态"));
     }
 
     /**
@@ -633,7 +637,7 @@ export class HeyBoxClient {
             offset: String(offset),
             limit: String(limit),
             no_more: "false",
-        });
+        }, validateMessageList);
     }
 
     /** 获取网页消息中心的一类互动消息（评论、获赞、关注、@我）。 */
@@ -651,7 +655,7 @@ export class HeyBoxClient {
         else if (kind === "award") params.list_type = "1";
         else if (kind === "follow") params.message_type = "4";
         else params.message_type = "16";
-        return this.get<MessageListResult>("/bbs/app/user/message", params);
+        return this.get<MessageListResult>("/bbs/app/user/message", params, validateMessageList);
     }
 
     /** 获取服务端默认收藏夹的帖子列表，不依赖本地缓存。 */

@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as crypto from "crypto";
 import { PostTreeResult, Comment } from "../types";
+import { sanitizeRichTextHtml } from "./sanitizeRichText";
 
 /**
  * 根据用户配置的主题偏好返回 CSS 变量覆盖字符串
@@ -58,44 +59,9 @@ function imageKey(url: string): string {
     }
 }
 
-function readHtmlAttribute(attrs: string, name: string): string {
-    const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const match = attrs.match(new RegExp(`\\b${escapedName}\\s*=\\s*(?:["']([^"']*)["']|([^\\s>]+))`, "i"));
-    return match?.[1] || match?.[2] || "";
-}
-
 /** 清洗富文本 HTML，同时恢复 data-original/data-src 中的正文定位图片。 */
 function renderHtmlBlock(value: unknown, embeddedImageKeys: Set<string>): string {
-    if (typeof value !== "string" || !value) return "";
-    return value
-        .replace(/<!--[\s\S]*?-->/g, "")
-        .replace(/<(script|style|iframe|object|embed|form)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-        .replace(/<([a-z][a-z0-9]*)\b([^>]*)>/gi, (_full, tag: string, attrs: string) => {
-            const name = tag.toLowerCase();
-            if (!["p", "br", "div", "span", "strong", "b", "em", "i", "u", "ol", "ul", "li", "blockquote", "img", "a"].includes(name)) return "";
-            if (name === "br") return "<br>";
-            if (name === "img") {
-                const src = readHtmlAttribute(attrs, "data-original")
-                    || readHtmlAttribute(attrs, "data-src")
-                    || readHtmlAttribute(attrs, "src");
-                if (!/^https?:\/\//i.test(src) && !/^data:image\//i.test(src)) return "";
-                const key = imageKey(src);
-                if (key) embeddedImageKeys.add(key);
-                const alt = readHtmlAttribute(attrs, "alt") || "帖子图片";
-                return `<img src="${escHtml(src)}" alt="${escHtml(alt)}" loading="lazy" />`;
-            }
-            if (name === "a") {
-                const href = readHtmlAttribute(attrs, "href");
-                return /^https?:\/\//i.test(href) ? `<a href="${escHtml(href)}">` : "";
-            }
-            return `<${name}>`;
-        })
-        .replace(/<\/([a-z][a-z0-9]*)\s*>/gi, (_full, tag: string) => {
-            const name = tag.toLowerCase();
-            return ["p", "div", "span", "strong", "b", "em", "i", "u", "ol", "ul", "li", "blockquote", "a"].includes(name)
-                ? `</${name}>`
-                : "";
-        });
+    return sanitizeRichTextHtml(value, embeddedImageKeys, imageKey);
 }
 
 /**
@@ -192,14 +158,14 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     const hasMoreComments = Number(postTree.has_more_floors) > 0 || (typeof postTree.has_more_floors !== "number" && commentGroups.length < commentCount);
 
     const themeOverrides = getThemeOverrides();
-    const rootStyle = themeOverrides ? ` style="${themeOverrides}"` : "";
+    const themeCss = themeOverrides ? `:root{${themeOverrides}}` : "";
     const nonce = scriptNonce();
 
     return `<!DOCTYPE html>
-<html lang="zh-CN"${rootStyle}>
+<html lang="zh-CN">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
-<style>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
+<style nonce="${nonce}">${themeCss}
     :root{--bg:var(--vscode-editor-background,#1e1e1e);--fg:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#9d9d9d);--border:var(--vscode-panel-border,#333);--badge-bg:var(--vscode-badge-background,#4d4d4d);--badge-fg:var(--vscode-badge-foreground,#fff);--input-bg:var(--vscode-input-background,#3c3c3c);--font:var(--vscode-font-family);--fs:var(--vscode-font-size,13px);--scale:.3}
     *{margin:0;padding:0;box-sizing:border-box}
     html,body{height:100%;overflow:hidden}
@@ -239,7 +205,7 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .loadReplies:hover,.loadMoreComments:hover{background:var(--badge-bg);color:var(--badge-fg)}
     .loadReplies:focus-visible,.loadMoreComments:focus-visible{outline:1px solid var(--vscode-focusBorder,#3794ff);outline-offset:1px}
     .loadReplies:disabled,.loadMoreComments:disabled{opacity:.65;cursor:wait}
-    .ftr{text-align:center;font-size:12px;color:var(--dim);padding:16px 0 8px}
+    .ftr{text-align:center;font-size:12px;color:var(--dim);padding:16px 0 8px}.ftr-note{font-style:italic}.folded-tips{color:var(--dim);font-size:12px}
     .image-viewer{position:fixed;z-index:10;inset:0;display:none;flex-direction:column;background:var(--bg)}
     .image-viewer.open{display:flex}
     .image-toolbar{display:flex;align-items:center;gap:6px;padding:8px;border-bottom:1px solid var(--border);flex-shrink:0}
@@ -259,9 +225,9 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     </article>
     <section aria-label="评论区">
     <h2 class="ch">💬 评论 (${commentCount})</h2>
-    ${commentsHtml || (foldedTips ? `<p style="color:var(--dim);font-size:12px">评论已被折叠: ${escHtml(foldedTips)}</p>` : '<p style="color:var(--dim);font-size:12px">暂无评论</p>')}
+    ${commentsHtml || (foldedTips ? `<p class="folded-tips">评论已被折叠: ${escHtml(foldedTips)}</p>` : '<p class="folded-tips">暂无评论</p>')}
     ${hasMoreComments ? `<button class="loadMoreComments" data-link="${escHtml(String(link.linkid))}">加载更多评论</button>` : ""}
-    ${commentNote ? `<div class="ftr" style="font-style:italic">${escHtml(commentNote)}</div>` : `<div class="ftr">${commentCount} 条评论${foldedTips ? '（已折叠）' : ''}</div>`}
+    ${commentNote ? `<div class="ftr ftr-note">${escHtml(commentNote)}</div>` : `<div class="ftr">${commentCount} 条评论${foldedTips ? '（已折叠）' : ''}</div>`}
     </section>
     </main>
     <section id="imageViewer" class="image-viewer" aria-label="图片查看器" aria-hidden="true"><div class="image-toolbar"><button id="closeImage" title="关闭图片查看器 (Esc)">关闭</button><button id="previousImage" title="上一张 (←)">上一张</button><button id="nextImage" title="下一张 (→)">下一张</button><button id="loadOriginal">加载原图</button><span id="imageStatus" class="image-status">当前为展示图</span></div><div id="imageStage" class="image-stage"><img id="viewerImage" alt="帖子图片"></div></section>
