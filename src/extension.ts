@@ -31,6 +31,14 @@ const MAX_HISTORY = 50;
 let pollTimer: ReturnType<typeof setInterval> | undefined;
 /** 已读消息 ID 集合，用于去重 */
 let lastSeenIds = new Set<string>();
+/** 只有最后一次打开帖子的异步响应可以更新详情视图。 */
+let postRequestGeneration = 0;
+/** 防止定时器与手动触发的通知检查重入。 */
+let pollInFlight = false;
+/** 登录/退出切换后，用于丢弃旧账号的迟到通知结果。 */
+let accountGeneration = 0;
+/** 每次启停提醒都会换代，避免关闭后的迟到请求重新点亮状态栏。 */
+let pollSessionGeneration = 0;
 
 /** 轮询时统一处理的只读通知条目。 */
 interface PolledNotification {
@@ -57,7 +65,7 @@ function getReadState(message: {
 }): "unread" | "read" | "unknown" {
     const normalized = (value: ReadStateValue): string => String(value ?? "").trim().toLowerCase();
     const isTrue = (value: ReadStateValue) => ["1", "true", "yes", "unread"].includes(normalized(value));
-    const isFalse = (value: ReadStateValue) => ["0", "false", "no", "unread"].includes(normalized(value));
+    const isFalse = (value: ReadStateValue) => ["0", "false", "no", "read"].includes(normalized(value));
     if (message.is_unread !== undefined) return isTrue(message.is_unread) ? "unread" : "read";
     if (message.unread !== undefined) return isTrue(message.unread) ? "unread" : "read";
     if (message.is_read !== undefined) return isFalse(message.is_read) ? "unread" : "read";
@@ -95,9 +103,18 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     postDetailProvider = new PostDetailViewProvider(context.extensionUri, (id, rootId) => {
         if (rootId) {
             const post = postDetailProvider?.getCurrentPost();
-            if (post) {
+            if (post && String(post.link.linkid) === id) {
                 void loadRepliesForPost(client, post, id, rootId, (updated, note) => {
-                    postDetailProvider?.showPost(updated, note, postDetailProvider.getFoldedTips());
+                    if (postDetailProvider?.getCurrentPost() === post) {
+                        postDetailProvider.showPost(updated, note, postDetailProvider.getFoldedTips());
+                    }
+                });
+            }
+        } else {
+            const post = postDetailProvider?.getCurrentPost();
+            if (post && String(post.link.linkid) === id) {
+                void loadMoreCommentsForPost(client, post, id, (updated, note) => {
+                    if (postDetailProvider?.getCurrentPost() === post) postDetailProvider.showPost(updated, note, postDetailProvider.getFoldedTips());
                 });
             }
         }
@@ -109,8 +126,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 状态栏消息提醒按钮
     const statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 0);
-    statusBarItem.command = "heybox.toggleNotifications";
-    statusBarItem.tooltip = "小黑盒消息提醒 (点击开启/关闭)";
+    statusBarItem.command = "heybox.openMessages";
+    statusBarItem.tooltip = "小黑盒消息（点击查看）";
     updateStatusBar(statusBarItem, 0, false);
     context.subscriptions.push(statusBarItem);
 
@@ -118,6 +135,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     checkCookieAndPrompt(context, client);
 
     // ─── 命令注册 ───
+    context.subscriptions.push(vscode.commands.registerCommand("heybox.openMessages", () => postListProvider!.switchTo("messages")));
 
     // 刷新帖子列表，重新加载配置
     context.subscriptions.push(vscode.commands.registerCommand("heybox.refreshList", async () => { await client.loadConfig(); postListProvider!.refresh(); }));
@@ -159,6 +177,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // 开启/关闭消息提醒 — 切换轮询状态
     context.subscriptions.push(vscode.commands.registerCommand("heybox.toggleNotifications", async () => {
         if (pollTimer) {
+            pollSessionGeneration++;
             clearInterval(pollTimer);
             pollTimer = undefined;
             updateStatusBar(statusBarItem, 0, false);
@@ -247,6 +266,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
             "确定", "取消"
         );
         if (confirmed === "确定") {
+            accountGeneration++;
+            pollSessionGeneration++;
             await client.clearCookie();
             vscode.window.showInformationMessage("已退出登录");
             postListProvider!.refresh();
@@ -282,7 +303,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 
     // 监听配置变更，自动刷新并重新应用设置
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(async (e) => {
-        if (e.affectsConfiguration("heybox")) { await client.loadConfig(); applyStealthMode(); postListProvider!.refresh(); }
+        if (e.affectsConfiguration("heybox")) {
+            await client.loadConfig();
+            applyStealthMode();
+            postListProvider!.refresh();
+            refreshOpenPostDetails();
+        }
     }));
 }
 
@@ -332,10 +358,41 @@ async function loadRepliesForPost(
     }
 }
 
+/** 追加下一页顶层评论。 */
+async function loadMoreCommentsForPost(
+    client: HeyBoxClient,
+    post: PostTreeResult,
+    linkId: string,
+    render: (post: PostTreeResult, note?: string) => void,
+): Promise<void> {
+    if (String(post.link.linkid) !== linkId || Number(post.has_more_floors) === 0) return;
+    try {
+        const offset = post.comments?.length || 0;
+        const page = await client.getPostTree(linkId, offset, 20);
+        const known = new Set((post.comments || []).map((group) => String(group.comment?.[0]?.commentid || "")));
+        const added = (page.comments || []).filter((group) => {
+            const id = String(group.comment?.[0]?.commentid || "");
+            if (!id || known.has(id)) return false;
+            known.add(id);
+            return true;
+        });
+        if (String(post.link.linkid) !== linkId) return;
+        post.comments = [...(post.comments || []), ...added];
+        post.has_more_floors = page.has_more_floors;
+        const shown = post.comments.reduce((sum, group) => sum + (group.comment?.length || 0), 0);
+        const total = post.link.comment_num || 0;
+        render(post, Number(post.has_more_floors) === 0 ? undefined : `共 ${total} 条评论，当前显示 ${shown} 条`);
+    } catch (error) {
+        vscode.window.showErrorMessage(`加载更多评论失败: ${(error as Error).message || "未知错误"}`);
+    }
+}
+
 async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxClient, linkId: string, loadAll = false, rootId?: string): Promise<void> {
+    const requestGeneration = ++postRequestGeneration;
     try {
         await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "加载帖子中...", cancellable: false }, async () => {
             const tree = await client.getPostTree(linkId, 0, loadAll ? 100 : 20);
+            if (requestGeneration !== postRequestGeneration) return;
             if (!tree || !tree.link) { vscode.window.showWarningMessage("未获取到帖子内容"); return; }
 
             // 记录浏览历史，最多保留 MAX_HISTORY 条，自动去重
@@ -390,11 +447,13 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
                 : `共 ${totalCommentNum} 条评论，当前显示 ${loadedCount} 条`;
 
             if (location === "sidebar" && postDetailProvider) {
+                if (requestGeneration !== postRequestGeneration) return;
                 postDetailProvider.showPost(fullTree, commentNote, foldedTips);
                 if (!postDetailProvider.isViewVisible()) {
                     vscode.window.showInformationMessage("帖子已加载，请在侧边栏点击「帖子详情」查看");
                 }
             } else {
+                if (requestGeneration !== postRequestGeneration) return;
                 if (currentPanel) currentPanel.dispose();
                 const col = location === "beside" ? vscode.ViewColumn.Beside : vscode.ViewColumn.Active;
                 const panel = vscode.window.createWebviewPanel("heybox.postDetailPanel", stealth ? "README.md" : "帖子", col, { enableScripts: true });
@@ -406,13 +465,17 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
                         void loadOriginalImage(client, panel.webview, msg.url);
                         return;
                     }
-                    if (msg?.command !== "loadReplies" || typeof msg.linkId !== "string" || typeof msg.rootId !== "string") return;
+                    if ((msg?.command !== "loadReplies" && msg?.command !== "loadMoreComments") || typeof msg.linkId !== "string") return;
                     if (currentPanel !== panel || !currentPanelPost) return;
-                    void loadRepliesForPost(client, currentPanelPost, msg.linkId, msg.rootId, (updated, note) => {
+                    const postAtRequest = currentPanelPost;
+                    const render = (updated: PostTreeResult, note?: string) => {
                         if (currentPanel !== panel) return;
+                        if (currentPanelPost !== postAtRequest) return;
                         currentPanelPost = updated;
                         panel.webview.html = postHtml(updated, isStealthMode(), note, currentPanelFoldedTips);
-                    });
+                    };
+                    if (msg.command === "loadReplies" && typeof msg.rootId === "string") void loadRepliesForPost(client, postAtRequest, msg.linkId, msg.rootId, render);
+                    else if (msg.command === "loadMoreComments") void loadMoreCommentsForPost(client, postAtRequest, msg.linkId, render);
                 });
                 panel.webview.html = postHtml(fullTree, stealth, commentNote, foldedTips);
                 panel.onDidDispose(() => {
@@ -425,6 +488,7 @@ async function openAndShowPost(context: vscode.ExtensionContext, client: HeyBoxC
             }
         });
     } catch (e) {
+        if (requestGeneration !== postRequestGeneration) return;
         if (isCaptchaError(e)) {
             vscode.window.showErrorMessage(
                 "帖子详情被服务端风控拦截，请在浏览器中完成人机验证后重新扫码登录。",
@@ -444,6 +508,14 @@ async function loadOriginalImage(client: HeyBoxClient, webview: vscode.Webview, 
     } catch (error) {
         const message = error instanceof Error ? error.message : "未知错误";
         await webview.postMessage({ command: "originalImageError", message });
+    }
+}
+
+function refreshOpenPostDetails(): void {
+    postDetailProvider?.refreshCurrentPost();
+    if (currentPanel && currentPanelPost) {
+        currentPanel.title = isStealthMode() ? "README.md" : (currentPanelPost.link.title || "帖子");
+        currentPanel.webview.html = postHtml(currentPanelPost, isStealthMode(), undefined, currentPanelFoldedTips);
     }
 }
 
@@ -496,9 +568,12 @@ function checkCookieAndPrompt(context: vscode.ExtensionContext, client: HeyBoxCl
  * 登录成功后的统一处理 — 提示并刷新列表，启动消息轮询
  */
 function onLoginSuccess(client: HeyBoxClient, context: vscode.ExtensionContext, statusBarItem?: vscode.StatusBarItem, nickname?: string): void {
+    accountGeneration++;
     vscode.window.showInformationMessage(nickname ? `登录成功，欢迎你，${nickname}！` : "登录成功！");
     postListProvider?.refresh();
-    if (!pollTimer && statusBarItem) {
+    if (statusBarItem) {
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = undefined;
         startPolling(client, statusBarItem, context);
     }
 }
@@ -516,7 +591,15 @@ async function loginByPaste(client: HeyBoxClient, context: vscode.ExtensionConte
     if (!cookie) return;
     if (client.validateCookie(cookie)) {
         await client.setCookie(cookie);
-        onLoginSuccess(client, context, statusBarItem);
+        try {
+            await client.getFavouriteLinks(0, 1);
+            onLoginSuccess(client, context, statusBarItem);
+        } catch (error) {
+            if (isAuthenticationError(error)) {
+                await client.clearCookie();
+                vscode.window.showErrorMessage("Cookie 已失效，请重新获取后再试。");
+            } else vscode.window.showWarningMessage(`无法验证 Cookie：${(error as Error).message || "网络请求失败"}`);
+        }
     } else {
         vscode.window.showErrorMessage("Cookie 格式无效，需要包含 heybox_id 或 x_xhh_tokenid");
     }
@@ -529,7 +612,15 @@ async function importCookieFromClipboard(context: vscode.ExtensionContext, clien
     const clip = await vscode.env.clipboard.readText();
     if (client.validateCookie(clip)) {
         await client.setCookie(clip);
-        vscode.window.showInformationMessage("Cookie 已导入！请刷新侧边栏。");
+        try {
+            await client.getFavouriteLinks(0, 1);
+            vscode.window.showInformationMessage("Cookie 已导入并验证成功！请刷新侧边栏。");
+        } catch (error) {
+            if (isAuthenticationError(error)) {
+                await client.clearCookie();
+                vscode.window.showErrorMessage("Cookie 已失效，请重新获取后再试。");
+            } else vscode.window.showWarningMessage(`Cookie 已保存，但暂时无法验证：${(error as Error).message || "网络请求失败"}`);
+        }
     } else {
         vscode.window.showWarningMessage("剪贴板内容不是有效的 Cookie，请重新复制（需要包含 heybox_id 字段）");
     }
@@ -572,14 +663,18 @@ function startPolling(client: HeyBoxClient, statusBarItem: vscode.StatusBarItem,
     if (!context.globalState.get<number>("heybox.notificationBaselineAt")) {
         void context.globalState.update("heybox.notificationBaselineAt", Date.now());
     }
-    checkMessages(client, statusBarItem, context);
-    pollTimer = setInterval(() => checkMessages(client, statusBarItem, context), 3 * 60 * 1000);
+    const account = accountGeneration;
+    const session = ++pollSessionGeneration;
+    void checkMessages(client, statusBarItem, context, account, session);
+    pollTimer = setInterval(() => { void checkMessages(client, statusBarItem, context, account, session); }, 3 * 60 * 1000);
 }
 
 /**
  * 检查新消息 — 覆盖互动、官方及游戏优惠；只读取各列表首屏，避免高频请求。
  */
-async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusBarItem, context: vscode.ExtensionContext) {
+async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusBarItem, context: vscode.ExtensionContext, generation = accountGeneration, session = pollSessionGeneration) {
+    if (pollInFlight || generation !== accountGeneration || session !== pollSessionGeneration || !client.getCookie()) return;
+    pollInFlight = true;
     try {
         const responses = await Promise.allSettled([
             client.getInteractionMessages("comment", 0, 10),
@@ -589,6 +684,7 @@ async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusB
             client.getOfficialMessages(0, 10),
             client.getDiscountMessages(0),
         ]);
+        if (generation !== accountGeneration || session !== pollSessionGeneration || !client.getCookie()) return;
         const rejected = responses
             .filter((response): response is PromiseRejectedResult => response.status === "rejected")
             .map((response) => response.reason);
@@ -656,21 +752,11 @@ async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusB
         if (newMsgs.length > 0) {
             updateStatusBar(statusBarItem, unread.length, true);
 
-            // 逐条弹窗通知新消息
-            for (const msg of newMsgs) {
-                const shortDesc = msg.detail.length > 50 ? msg.detail.substring(0, 50) + "..." : msg.detail;
-                if (msg.linkId) {
-                    const action = await vscode.window.showInformationMessage(`${msg.title}: ${shortDesc}`, "查看帖子");
-                    if (action === "查看帖子") {
-                        await vscode.commands.executeCommand("heybox.openPost", { linkid: Number(msg.linkId) });
-                    }
-                } else {
-                    vscode.window.showInformationMessage(`${msg.title}: ${shortDesc}`);
-                }
-
-                // 标记为已读
-                lastSeenIds.add(msg.id);
-            }
+            const first = newMsgs[0];
+            const action = await vscode.window.showInformationMessage(`小黑盒有 ${newMsgs.length} 条新消息${first ? `：${first.title}` : ""}`, "查看消息");
+            if (generation !== accountGeneration || session !== pollSessionGeneration) return;
+            if (action === "查看消息") postListProvider?.switchTo("messages");
+            for (const msg of newMsgs) lastSeenIds.add(msg.id);
 
             // 持久化已读 ID，最多保留 400 条防止无限增长。
             const seenArr = Array.from(lastSeenIds).slice(-400);
@@ -683,6 +769,8 @@ async function checkMessages(client: HeyBoxClient, statusBarItem: vscode.StatusB
             if (pollTimer) { clearInterval(pollTimer); pollTimer = undefined; }
             updateStatusBar(statusBarItem, 0, false);
         }
+    } finally {
+        pollInFlight = false;
     }
 }
 

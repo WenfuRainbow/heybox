@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import * as crypto from "crypto";
 import { PostTreeResult, Comment } from "../types";
 
 /**
@@ -41,6 +42,10 @@ function escHtml(value: unknown): string {
     if (value === null || value === undefined) return "";
     const s = String(value);
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+}
+
+function scriptNonce(): string {
+    return crypto.randomBytes(16).toString("base64");
 }
 
 /** 用图片文件名识别 HTML 定位图与数组末尾的缩略图副本。 */
@@ -120,6 +125,8 @@ function renderContent(text: string): string {
                 }
                 if (["text", "txt"].includes(type) && (b.text || b.content)) return `<p>${escHtml(b.text || b.content)}</p>`;
                 if (type === "html") return renderedHtml.get(index) || "";
+                if (["video", "vote", "poll"].includes(type)) return `<p class="unsupported">此${type === "video" ? "视频" : "互动内容"}暂不支持在插件中展示，请在原帖中查看。</p>`;
+                if (type) return `<p class="unsupported">暂不支持的内容类型：${escHtml(type)}</p>`;
                 return "";
             }).join("");
         }
@@ -132,7 +139,7 @@ function renderCommentHtml(c: Comment, sub: boolean, stealth: boolean): string {
     const level = c.user.level_info?.status === 1 ? `Lv.${c.user.level_info.level}` : "";
     const replyto = c.replyuser ? `<span class="rpl">${escHtml(c.replyuser.username)}</span>` : "";
     const imgs = (c.imgs || []).map((i) => `<img class="cimg" src="${escHtml(i.url)}" alt="评论图片" loading="lazy" />`).join("");
-    const avatar = (!c.user.avatar || stealth) ? "" : `<img class="cava" src="${escHtml(c.user.avatar)}" alt="${escHtml(c.user.username)} 的头像" onerror="this.style.display='none'" />`;
+    const avatar = (!c.user.avatar || stealth) ? "" : `<img class="cava" src="${escHtml(c.user.avatar)}" alt="${escHtml(c.user.username)} 的头像" />`;
     return `<article class="cm${sub ? " sub" : ""}" aria-label="${escHtml(c.user.username)} 的评论">${avatar}<div class="cbd"><div class="chd">${escHtml(c.user.username)} ${level ? `<span class="clv">${level}</span>` : ""} <span class="flr">#${c.floor_num}</span> ${replyto}</div><div class="cmeta">${formatTs(c.create_at)}${c.ip_location ? ` · ${escHtml(c.ip_location)}` : ""}${!stealth ? ` · 👍${c.up}` : ""}</div><div class="ct">${escHtml(c.text || "")}</div>${imgs}</div></article>`;
 }
 
@@ -182,30 +189,34 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
             : "";
         return `<section class="cg" aria-label="评论组">${main}${subs}${more}</section>`;
     }).join("");
+    const hasMoreComments = Number(postTree.has_more_floors) > 0 || (typeof postTree.has_more_floors !== "number" && commentGroups.length < commentCount);
 
     const themeOverrides = getThemeOverrides();
     const rootStyle = themeOverrides ? ` style="${themeOverrides}"` : "";
+    const nonce = scriptNonce();
 
     return `<!DOCTYPE html>
 <html lang="zh-CN"${rootStyle}>
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src https: data:; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 <style>
-    :root{--bg:var(--vscode-editor-background,#1e1e1e);--fg:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#9d9d9d);--border:var(--vscode-panel-border,#333);--badge-bg:var(--vscode-badge-background,#4d4d4d);--badge-fg:var(--vscode-badge-foreground,#fff);--input-bg:var(--vscode-input-background,#3c3c3c);--font:var(--vscode-font-family);--fs:var(--vscode-font-size,13px);--scale:1}
+    :root{--bg:var(--vscode-editor-background,#1e1e1e);--fg:var(--vscode-editor-foreground,#d4d4d4);--dim:var(--vscode-descriptionForeground,#9d9d9d);--border:var(--vscode-panel-border,#333);--badge-bg:var(--vscode-badge-background,#4d4d4d);--badge-fg:var(--vscode-badge-foreground,#fff);--input-bg:var(--vscode-input-background,#3c3c3c);--font:var(--vscode-font-family);--fs:var(--vscode-font-size,13px);--scale:.3}
     *{margin:0;padding:0;box-sizing:border-box}
     html,body{height:100%;overflow:hidden}
     body{font-family:var(--font);font-size:var(--fs);background:var(--bg);color:var(--fg);line-height:1.6;display:flex;flex-direction:column}
     .ctrl{display:flex;align-items:center;gap:10px;font-size:12px;color:var(--dim);padding:8px 24px;border-bottom:1px solid var(--border);background:var(--bg);flex-shrink:0}
     main{flex:1;overflow-y:auto;padding:16px 24px}
+    main>article,main>section{max-width:820px;margin-left:auto;margin-right:auto}
     .ctrl label{white-space:nowrap}
     .ctrl input{flex:1;max-width:160px;accent-color:var(--vscode-textLinkForeground,#3794ff);cursor:pointer}
     .ctrl-hint{white-space:nowrap}
-    @media (max-width:480px){.ctrl{gap:6px;padding:6px 12px}.ctrl-hint{display:none}}
+    @media (max-width:480px){.ctrl{gap:6px;padding:6px 12px}.ctrl-hint{display:none}main{padding:12px}.cm{gap:7px}.cm.sub{margin-left:20px}.loadReplies,.loadMoreComments{margin-left:20px}h1{font-size:19px}}
     h1{font-size:22px;font-weight:700;margin-bottom:10px}
     .meta{font-size:12px;color:var(--dim);margin-bottom:6px}
     .tags{font-size:12px;color:var(--dim);margin-bottom:8px}
     .body{font-size:14px;margin-bottom:20px}
     .body p{margin:6px 0;white-space:pre-wrap}
+    .unsupported{padding:8px 10px;margin:8px 0;background:var(--input-bg);color:var(--dim);border-left:3px solid var(--border);font-size:12px}
     .body img,.cimg{max-width:calc(100%*var(--scale));border-radius:6px;margin:6px 0;display:block;cursor:zoom-in;transition:max-width .15s}
     .ch{font-size:16px;font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--border);margin-bottom:14px}
     .cg{margin-bottom:14px}
@@ -219,10 +230,10 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     .rpl{font-size:12px;color:var(--dim)}.rpl::before{content:"↳ "}
     .ct{font-size:13px;margin:4px 0;white-space:pre-wrap;word-break:break-word}
     .cmeta{font-size:11px;color:var(--dim);display:flex;gap:8px}
-    .loadReplies{margin-left:46px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
-    .loadReplies:hover{background:var(--badge-bg);color:var(--badge-fg)}
-    .loadReplies:focus-visible{outline:1px solid var(--vscode-focusBorder,#3794ff);outline-offset:1px}
-    .loadReplies:disabled{opacity:.65;cursor:wait}
+    .loadReplies,.loadMoreComments{margin-left:46px;padding:4px 8px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--fg);font:inherit;font-size:12px;cursor:pointer}
+    .loadReplies:hover,.loadMoreComments:hover{background:var(--badge-bg);color:var(--badge-fg)}
+    .loadReplies:focus-visible,.loadMoreComments:focus-visible{outline:1px solid var(--vscode-focusBorder,#3794ff);outline-offset:1px}
+    .loadReplies:disabled,.loadMoreComments:disabled{opacity:.65;cursor:wait}
     .ftr{text-align:center;font-size:12px;color:var(--dim);padding:16px 0 8px}
     .image-viewer{position:fixed;z-index:10;inset:0;display:none;flex-direction:column;background:var(--bg)}
     .image-viewer.open{display:flex}
@@ -245,14 +256,15 @@ export function postHtml(postTree: PostTreeResult, stealth: boolean, commentNote
     <section aria-label="评论区">
     <h2 class="ch">💬 评论 (${commentCount})</h2>
     ${commentsHtml || (foldedTips ? `<p style="color:var(--dim);font-size:12px">评论已被折叠: ${escHtml(foldedTips)}</p>` : '<p style="color:var(--dim);font-size:12px">暂无评论</p>')}
+    ${hasMoreComments ? `<button class="loadMoreComments" data-link="${escHtml(String(link.linkid))}">加载更多评论</button>` : ""}
     ${commentNote ? `<div class="ftr" style="font-style:italic">${escHtml(commentNote)}</div>` : `<div class="ftr">${commentCount} 条评论${foldedTips ? '（已折叠）' : ''}</div>`}
     </section>
     </main>
     <section id="imageViewer" class="image-viewer" aria-label="图片查看器" aria-hidden="true"><div class="image-toolbar"><button id="closeImage" title="关闭图片查看器">关闭</button><button id="loadOriginal">加载原图</button><span id="imageStatus" class="image-status">当前为展示图</span></div><div id="imageStage" class="image-stage"><img id="viewerImage" alt="帖子图片"></div></section>
-<script>
+<script nonce="${nonce}">
 (function(){
-var s=document.getElementById('s'),l=document.getElementById('sl'),r=document.documentElement;
-var v=localStorage.getItem('hb_img');if(v){s.value=v;r.style.setProperty('--scale',v/100);l.textContent=v+'%'}else l.textContent='30%';
+var api=acquireVsCodeApi(),s=document.getElementById('s'),l=document.getElementById('sl'),r=document.documentElement;
+var v=localStorage.getItem('hb_img');if(v){s.value=v;r.style.setProperty('--scale',v/100);l.textContent=v+'%'}else {r.style.setProperty('--scale','.3');l.textContent='30%'};
 s.addEventListener('input',function(){var v=this.value;r.style.setProperty('--scale',v/100);l.textContent=v+'%';localStorage.setItem('hb_img',v)});
 
 var main=document.querySelector('main');
@@ -261,13 +273,16 @@ if(main&&savedScrollTop!==null){
   requestAnimationFrame(function(){main.scrollTop=Number(savedScrollTop);sessionStorage.removeItem('hb_scroll_top')});
 }
 
-var viewer=document.getElementById('imageViewer'),viewerImage=document.getElementById('viewerImage'),imageStage=document.getElementById('imageStage'),loadOriginal=document.getElementById('loadOriginal'),imageStatus=document.getElementById('imageStatus'),imageSource='';
-function closeImage(){viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');}
-document.addEventListener('click',function(e){var t=e.target;if(t.tagName==='IMG'&&t.matches('.body img,.cimg')){imageSource=t.currentSrc||t.src;viewerImage.src=imageSource;viewerImage.alt=t.alt||'帖子图片';imageStatus.textContent='当前为展示图';loadOriginal.disabled=false;loadOriginal.textContent='加载原图';viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');imageStage.scrollTop=0;imageStage.scrollLeft=0;}});
-document.getElementById('closeImage').addEventListener('click',closeImage);document.addEventListener('keydown',function(e){if(e.key==='Escape')closeImage()});
-loadOriginal.addEventListener('click',function(){if(!imageSource)return;loadOriginal.disabled=true;loadOriginal.textContent='正在加载…';imageStatus.textContent='正在请求原图…';acquireVsCodeApi().postMessage({command:'loadOriginalImage',url:imageSource});});
+var viewer=document.getElementById('imageViewer'),viewerImage=document.getElementById('viewerImage'),imageStage=document.getElementById('imageStage'),loadOriginal=document.getElementById('loadOriginal'),imageStatus=document.getElementById('imageStatus'),imageSource='',imageIndex=0,lastFocused=null;
+function images(){return Array.prototype.slice.call(document.querySelectorAll('.body img,.cimg'));}
+function showImage(index){var all=images();if(!all.length)return;imageIndex=(index+all.length)%all.length;var img=all[imageIndex];imageSource=img.currentSrc||img.src;viewerImage.src=imageSource;viewerImage.alt=img.alt||'帖子图片';imageStatus.textContent=(imageIndex+1)+' / '+all.length+' · 当前为展示图';loadOriginal.disabled=false;loadOriginal.textContent='加载原图';imageStage.scrollTop=0;imageStage.scrollLeft=0;}
+function closeImage(){if(!viewer.classList.contains('open'))return;viewer.classList.remove('open');viewer.setAttribute('aria-hidden','true');if(lastFocused&&lastFocused.focus)lastFocused.focus();}
+document.addEventListener('click',function(e){var t=e.target;if(t.tagName==='IMG'&&t.matches('.body img,.cimg')){lastFocused=t;showImage(images().indexOf(t));viewer.classList.add('open');viewer.setAttribute('aria-hidden','false');document.getElementById('closeImage').focus();}});
+document.getElementById('closeImage').addEventListener('click',closeImage);document.addEventListener('keydown',function(e){if(!viewer.classList.contains('open'))return;if(e.key==='Escape'){e.preventDefault();closeImage()}else if(e.key==='ArrowLeft'){e.preventDefault();showImage(imageIndex-1)}else if(e.key==='ArrowRight'){e.preventDefault();showImage(imageIndex+1)}});
+loadOriginal.addEventListener('click',function(){if(!imageSource)return;loadOriginal.disabled=true;loadOriginal.textContent='正在加载…';imageStatus.textContent='正在请求原图…';api.postMessage({command:'loadOriginalImage',url:imageSource});});
 window.addEventListener('message',function(event){var data=event.data||{};if(data.command==='originalImageOpened'&&viewer.classList.contains('open')){closeImage();return}if(data.command==='originalImage'&&viewer.classList.contains('open')){viewerImage.src=data.url;loadOriginal.textContent='已加载原图';imageStatus.textContent='正在显示原图';return}if(data.command==='originalImageError'&&viewer.classList.contains('open')){loadOriginal.disabled=false;loadOriginal.textContent='重试加载原图';imageStatus.textContent='原图加载失败：'+(data.message||'未知错误')}});
-document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';acquireVsCodeApi().postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});
+document.querySelectorAll('.loadReplies').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';api.postMessage({command:'loadReplies',linkId:'${escHtml(String(link.linkid))}',rootId:b.getAttribute('data-root')});});});
+document.querySelectorAll('.loadMoreComments').forEach(function(b){b.addEventListener('click',function(){if(main)sessionStorage.setItem('hb_scroll_top',String(main.scrollTop));b.disabled=true;b.textContent='正在加载…';api.postMessage({command:'loadMoreComments',linkId:b.getAttribute('data-link')});});});
 })();
 </script>
 </body></html>`;

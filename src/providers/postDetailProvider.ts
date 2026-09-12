@@ -16,7 +16,8 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
 
     constructor(
         private readonly extensionUri: vscode.Uri,
-        private readonly onLoadAll?: (linkId: string, rootId?: string) => void,
+        /** rootId 有值时加载该楼层回复；没有 rootId 时加载下一页顶层评论。 */
+        private readonly onLoadMoreComments?: (linkId: string, rootId?: string) => void,
         private readonly onRequestOriginalImage?: (url: string) => Promise<string>,
         private readonly onOpenOriginalImage?: (url: string) => void,
     ) {}
@@ -30,7 +31,9 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
         this._view = webviewView;
         webviewView.webview.options = { enableScripts: true, localResourceRoots: [this.extensionUri] };
         webviewView.webview.onDidReceiveMessage((msg) => {
-            if (msg?.command === "loadReplies" && typeof msg.linkId === "string") this.onLoadAll?.(msg.linkId, msg.rootId);
+            if ((msg?.command === "loadReplies" || msg?.command === "loadMoreComments") && typeof msg.linkId === "string") {
+                this.onLoadMoreComments?.(msg.linkId, typeof msg.rootId === "string" ? msg.rootId : undefined);
+            }
             if (msg?.command === "loadOriginalImage" && isSupportedImageUrl(msg.url)) void this.loadOriginalImage(msg.url);
         });
         webviewView.title = getPanelTitle();
@@ -63,6 +66,13 @@ export class PostDetailViewProvider implements vscode.WebviewViewProvider {
             this._view.webview.html = postHtml(postTree, isStealth(), commentNote, foldedTips);
             this._view.title = isStealth() ? "README.md" : (postTree.link.title || "帖子");
         }
+    }
+
+    /** 配置（主题、隐身模式等）变化后重新渲染已打开的详情。 */
+    refreshCurrentPost(commentNote?: string): void {
+        if (!this._currentPost || !this._view) return;
+        this._view.webview.html = postHtml(this._currentPost, isStealth(), commentNote, this._foldedTips);
+        this._view.title = isStealth() ? "README.md" : (this._currentPost.link.title || "帖子");
     }
 
     /** 未选中帖子时的占位 HTML 页面 */

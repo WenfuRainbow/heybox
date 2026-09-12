@@ -95,6 +95,8 @@ export class PostListProvider
     private searchHasMore: boolean = true;
     /** 搜索是否正在加载中 */
     private searchLoading: boolean = false;
+    /** 搜索请求失败信息；空结果与请求失败需要分别呈现。 */
+    private searchError: string | undefined;
 
     /** 推荐流帖子列表 */
     private feedPosts: SearchItemInfo[] = [];
@@ -102,6 +104,10 @@ export class PostListProvider
     private feedOffset: number = 0;
     /** 推荐流是否正在加载中 */
     private feedLoading: boolean = false;
+    /** 推荐流是否还有下一页。 */
+    private feedHasMore: boolean = true;
+    /** 每个板块是否还有下一页。 */
+    private topicHasMore: Map<number, boolean> = new Map();
 
     /** 帖子收藏数缓存，key = linkid, value = favour_count */
     private favCache: Map<number, number> = new Map();
@@ -149,14 +155,24 @@ export class PostListProvider
         this._onDidChangeTreeData.dispose();
     }
 
-    /** 重置所有缓存数据并触发树刷新 */
+    /** 重置缓存并触发树刷新；搜索状态下保留关键词并重新搜索。 */
     refresh(): void {
-        this.exitSearch();
+        if (this.searchMode) {
+            this.searchResults = [];
+            this.searchOffset = 0;
+            this.searchHasMore = true;
+            this.searchError = undefined;
+            void this.loadMoreSearchResults();
+            this._onDidChangeTreeData.fire();
+            return;
+        }
         this.topics = [];
         this.topicPosts.clear();
         this.topicOffsets.clear();
+        this.topicHasMore.clear();
         this.feedPosts = [];
         this.feedOffset = 0;
+        this.feedHasMore = true;
         this.favCache.clear();
         this.favouritePosts = [];
         this.favouriteOffset = 0;
@@ -175,6 +191,7 @@ export class PostListProvider
         this.searchQuery = "";
         this.searchOffset = 0;
         this.searchHasMore = true;
+        this.searchError = undefined;
     }
 
     /** 切换视图模式并刷新树 */
@@ -195,6 +212,7 @@ export class PostListProvider
         this.searchOffset = 0;
         this.searchHasMore = true;
         this.searchResults = [];
+        this.searchError = undefined;
         await this.loadMoreSearchResults();
         this._onDidChangeTreeData.fire();
     }
@@ -228,7 +246,8 @@ export class PostListProvider
                 this.searchHasMore = false;
             }
         } catch (e) {
-            vscode.window.showErrorMessage(`搜索失败: ${(e as Error).message}`);
+            this.searchError = (e as Error).message || "未知错误";
+            this.searchHasMore = false;
         } finally { this.searchLoading = false; }
     }
 
@@ -252,7 +271,9 @@ export class PostListProvider
             if (this.viewMode === "recommend") {
                 if (this.feedPosts.length === 0 && !this.feedLoading) await this.fetchFeed();
                 tabs.push(...this.feedPosts.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
-                tabs.push(new LoadMoreFeedItem());
+                if (this.feedLoading) tabs.push(new BusyItem("正在加载推荐..."));
+                else if (this.feedHasMore) tabs.push(new LoadMoreFeedItem());
+                else if (this.feedPosts.length === 0) tabs.push(new TabEmptyItem("暂无推荐帖子"));
             } else if (this.viewMode === "favorites") {
                 if (!this.favouritesLoaded && !this.favouritesLoading) await this.fetchFavourites();
                 if (this.favouritePosts.length === 0) {
@@ -276,7 +297,9 @@ export class PostListProvider
             const tid = element.topic.topic_id;
             if (!this.topicPosts.has(tid)) await this.fetchTopicPosts(tid);
             const items: TreeItemBase[] = (this.topicPosts.get(tid) || []).map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache));
-            items.push(new LoadMoreTopicItem(tid));
+            if (this.loadingTopicsSet.has(tid)) items.push(new BusyItem("正在加载帖子..."));
+            else if (this.topicHasMore.get(tid) !== false) items.push(new LoadMoreTopicItem(tid));
+            else if (items.length === 0) items.push(new TabEmptyItem("暂无帖子"));
             return items;
         }
         if (element instanceof MessageSectionItem) {
@@ -298,10 +321,9 @@ export class PostListProvider
     private getSearchChildren(element?: TreeItemBase): TreeItemBase[] {
         if (!element) {
             const items: TreeItemBase[] = [new BackToTopicsItem(), new SearchHeaderItem(`搜索: ${this.searchQuery}`)];
-            if (this.searchResults.length === 0 && !this.searchLoading) {
-                items.push(new BusyItem("搜索中..."));
-                this.loadMoreSearchResults();
-            }
+            if (this.searchLoading) items.push(new BusyItem("搜索中..."));
+            else if (this.searchError) items.push(new TabEmptyItem(`搜索失败：${this.searchError}`));
+            else if (this.searchResults.length === 0) items.push(new TabEmptyItem("没有找到相关帖子"));
             items.push(...this.searchResults.map((p) => new PostItem(p, vscode.TreeItemCollapsibleState.None, this.favCache)));
             if (this.searchResults.length > 0 && this.searchHasMore) items.push(new LoadMoreSearchItem());
             return items;
@@ -311,12 +333,21 @@ export class PostListProvider
 
     /** 获取推荐流帖子，使用 offset 分页追加 */
     private async fetchFeed(): Promise<void> {
-        if (this.feedLoading) return;
+        if (this.feedLoading || !this.feedHasMore) return;
         this.feedLoading = true;
         try {
             const result = await this.client.getFeed(this.feedOffset);
-            this.feedPosts = this.feedPosts.concat((result.links || []).filter((p) => p && p.linkid));
-            this.feedOffset = this.feedPosts.length;
+            const page = (result.links || []).filter((p) => p && p.linkid);
+            const known = new Set(this.feedPosts.map((post) => String(post.linkid)));
+            const added = page.filter((post) => {
+                const id = String(post.linkid);
+                if (known.has(id)) return false;
+                known.add(id);
+                return true;
+            });
+            this.feedPosts.push(...added);
+            this.feedOffset += page.length;
+            this.feedHasMore = page.length > 0 && added.length > 0;
         } catch (e) { vscode.window.showErrorMessage(`获取推荐失败: ${(e as Error).message}`); }
         finally { this.feedLoading = false; }
         this.fetchFavCounts(this.feedPosts);
@@ -334,16 +365,25 @@ export class PostListProvider
 
     /** 懒加载指定板块下的帖子列表，支持分页追加 */
     private async fetchTopicPosts(topicId: number): Promise<void> {
-        if (this.loadingTopicsSet.has(topicId)) return;
+        if (this.loadingTopicsSet.has(topicId) || this.topicHasMore.get(topicId) === false) return;
         this.loadingTopicsSet.add(topicId);
         this.expandedTopics.add(topicId);
         this.saveExpanded();
         try {
             const offset = this.topicOffsets.get(topicId) || 0;
             const result = await this.client.getTopicFeeds(topicId, offset, 30);
-            const newPosts = (result.links || []).filter((p) => p && p.linkid);
-            this.topicPosts.set(topicId, (this.topicPosts.get(topicId) || []).concat(newPosts));
-            this.topicOffsets.set(topicId, offset + newPosts.length);
+            const page = (result.links || []).filter((p) => p && p.linkid);
+            const existing = this.topicPosts.get(topicId) || [];
+            const known = new Set(existing.map((post) => String(post.linkid)));
+            const added = page.filter((post) => {
+                const id = String(post.linkid);
+                if (known.has(id)) return false;
+                known.add(id);
+                return true;
+            });
+            this.topicPosts.set(topicId, existing.concat(added));
+            this.topicOffsets.set(topicId, offset + page.length);
+            this.topicHasMore.set(topicId, page.length > 0 && added.length > 0 && page.length >= 30);
         } catch (e) { vscode.window.showErrorMessage(`获取帖子列表失败: ${(e as Error).message}`); }
         finally { this.loadingTopicsSet.delete(topicId); }
         this.fetchFavCounts(this.topicPosts.get(topicId) || []);
